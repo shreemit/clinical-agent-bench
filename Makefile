@@ -1,7 +1,9 @@
-PYTHON ?= python3
 export PYTHONPATH := src
 
-.PHONY: fetch load up snapshot reset smoke test test-docker
+.PHONY: sync fetch load up snapshot reset smoke test test-docker
+
+sync:
+	uv sync --extra dev
 
 fetch:
 	bash scripts/fetch_medagentbench.sh
@@ -19,10 +21,10 @@ reset:
 	bash scripts/snapshot_restore.sh
 
 smoke:
-	$(PYTHON) -m smoke
+	uv run python -m smoke
 
 test:
-	$(PYTHON) -m pytest -m "not docker"
+	uv run pytest -m "not docker"
 
 test-docker:
-	$(PYTHON) -m pytest -m docker
+	uv run pytest -m docker

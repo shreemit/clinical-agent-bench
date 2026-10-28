@@ -17,6 +17,7 @@ The fault proxy, idempotency wrapper, state-diff grader, repair-loop grader, pre
 ## Prerequisites
 
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
 - Docker Engine with the Compose plugin
 - About 10GB of free disk for two copies of the H2 file (snapshot + live)
 - Port 8080 free
@@ -24,17 +25,17 @@ The fault proxy, idempotency wrapper, state-diff grader, repair-loop grader, pre
 ## Exact local run
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
+uv sync --extra dev
 
 make fetch    # docker pull of the pinned image; verifies vendored task checksums
 make load     # copy /data/test_db.mv.db out of the image into docker/live and docker/snapshots/clean
 make up       # start HAPI and wait until /fhir/metadata is 200
-make test     # pytest, no Docker
+make test     # uv run pytest, no Docker
 make test-docker
-make smoke    # 10 resets + 10 tasks; prints the table
+make smoke    # uv run python -m smoke; 10 resets + 10 tasks
 ```
+
+`uv sync` installs the dev group (pytest). `uv sync --extra dev` installs that extra as well. `make test` runs `uv run pytest -m "not docker"`. `make smoke` runs `uv run python -m smoke`.
 
 `make reset` restores the snapshot once and prints one timing line. `make snapshot` stops HAPI and replaces the clean snapshot with the current live file. Take that only from a database that has not been written since the last reset.
 
