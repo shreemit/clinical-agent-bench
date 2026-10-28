@@ -1,11 +1,8 @@
-"""Parse and score snapshot-restore timings against the plan's 5 second gate."""
-
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 
-# Lean plan Week 1 go/no-go: restore the patient chart in under 5 seconds.
 RESET_TARGET_MS = 5000
 
 

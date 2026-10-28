@@ -1,5 +1,3 @@
-"""Load vendored MedAgentBench v2 tasks and the smoke id list."""
-
 from __future__ import annotations
 
 import json

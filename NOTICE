@@ -15,5 +15,5 @@ Apache-2.0, https://github.com/hapifhir/hapi-fhir-jpaserver-starter) and copy
 its /data/test_db.mv.db into a local Docker bind mount. That database is the
 MedAgentBench patient extract shipped by the benchmark authors.
 
-The Week 1 mock agent reimplements the benchmark's deterministic clinical
-steps (search, then POST/PUT). It does not copy MedAgentBench refsol.py.
+The mock agent reimplements the benchmark's deterministic clinical steps
+(search, then POST/PUT). It does not copy MedAgentBench refsol.py.

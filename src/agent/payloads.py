@@ -1,16 +1,6 @@
-"""FHIR R4 bodies the mock agent writes.
-
-These are valid R4 resources that HAPI accepted in a manual check against the
-MedAgentBench image. MedAgentBench's reference checker expects a few
-non-R4 shapes (MedicationRequest.dosageInstruction.route as a bare string,
-ServiceRequest.note as an object). Week 1 sends the R4 shapes so the POST
-succeeds on HAPI.
-
-TODO(decision): keep R4-valid route/note, or match refsol's non-R4 shapes so a
-later transcript grader can compare payloads byte-for-byte.
-"""
-
 from __future__ import annotations
+
+# TODO(decision): route is a CodeableConcept and note is an array, not the reference checker's string route and object note.
 
 from typing import Any
 

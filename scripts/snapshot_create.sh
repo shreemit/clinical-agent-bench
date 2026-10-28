@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Stop HAPI and copy the live database file over the clean snapshot.
-# Run this only while the live database is still the pristine MedAgentBench
-# load (or immediately after `make reset`). A snapshot taken after writes
-# becomes the new baseline.
 source "$(dirname "$0")/lib.sh"
 
 if [[ ! -s "$LIVE_DB" ]]; then

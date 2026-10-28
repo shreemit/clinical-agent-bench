@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# Restore the Docker bind-mounted H2 file from the clean snapshot, restart
-# HAPI, and time the whole reset until GET /fhir/metadata returns 200.
-#
-# The plan's Week 1 gate is under 5000 ms. This script records the measured
-# duration either way. The copy and the JVM restart are timed separately.
 source "$(dirname "$0")/lib.sh"
 
 if [[ ! -s "$SNAPSHOT_DB" ]]; then

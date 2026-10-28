@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Pull the pinned MedAgentBench HAPI image and verify vendored task files.
 source "$(dirname "$0")/lib.sh"
 
 echo "Pulling $HAPI_IMAGE"

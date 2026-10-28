@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Copy the pristine MedAgentBench H2 database out of the image into the
-# snapshot directory and the live bind-mount. Does not start HAPI.
 source "$(dirname "$0")/lib.sh"
 
 mkdir -p "$(dirname "$SNAPSHOT_DB")" "$LIVE_DIR" "$ROOT/runs"

@@ -1,5 +1,3 @@
-"""Invoke scripts/snapshot_restore.sh and return its timing receipt."""
-
 from __future__ import annotations
 
 import subprocess

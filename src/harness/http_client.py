@@ -1,5 +1,3 @@
-"""Minimal FHIR HTTP client. Stdlib only; no model-provider SDKs."""
-
 from __future__ import annotations
 
 import json

@@ -12,7 +12,7 @@ from proxy.fault_proxy import proxy_post
 from runners.prefix_runner import run_from_prefix
 
 
-def test_later_week_stubs_are_unwired():
+def test_unimplemented_modules_raise():
     with pytest.raises(NotImplementedError):
         ClinicianGate().approve({})
     with pytest.raises(NotImplementedError):
@@ -31,7 +31,7 @@ def test_later_week_stubs_are_unwired():
         reset_patient_after_trial("S1", [])
 
 
-def test_week1_source_does_not_import_a_model_sdk():
+def test_source_does_not_import_a_model_sdk():
     root = Path(__file__).resolve().parents[1] / "src"
     banned = ("openai", "anthropic", "groq", "together", "litellm")
     offenders = []

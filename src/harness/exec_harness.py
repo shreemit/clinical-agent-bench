@@ -1,12 +1,3 @@
-"""Run one task: the agent proposes FHIR calls, the harness performs them.
-
-Week 1 forwards every GET, POST, and PUT to the FHIR base URL. There is no
-fault proxy and no autonomy-rung gate on this path.
-
-TODO(decision): the lean plan's ExecHarness.step also takes an autonomy rung
-and can reject writes at A0-A2. Week 1 always forwards writes.
-"""
-
 from __future__ import annotations
 
 import json
@@ -16,6 +7,7 @@ from harness.http_client import HttpClient, UrllibHttpClient
 from harness.types import AgentAction, CapturedCall, TaskCase, ToolObservation, TrialRecord
 
 
+# TODO(decision): every write is forwarded; there is no clinician approval step.
 class ExecHarness:
     def __init__(
         self,
@@ -93,19 +85,13 @@ class ExecHarness:
         )
 
 
+# TODO(decision): families other than task1 have no sol, so their answers are not graded.
 def evaluate_trial(
     task: TaskCase,
     calls: list[CapturedCall],
     finish_text: str | None,
 ) -> tuple[bool, str | None]:
-    """Smoke outcome for one trial.
-
-    A trial passes when every FHIR call returned 2xx and the agent finished.
-    When the task file includes `sol`, the FINISH payload must equal that list.
-
-    TODO(decision): families other than task1 have no `sol` in test_data_v2.json.
-    Week 1 does not grade those answers. Stanford refsol.py is a later grader.
-    """
+    """Pass on all-2xx calls plus FINISH, and sol when the task file has one."""
 
     for call in calls:
         if call.status < 200 or call.status >= 300:

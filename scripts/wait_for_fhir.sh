@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Block until HAPI answers GET /fhir/metadata, or fail after ~180s.
 source "$(dirname "$0")/lib.sh"
 
 for _ in $(seq 1 90); do

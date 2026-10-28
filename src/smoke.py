@@ -1,11 +1,3 @@
-"""10-task smoke: reset, run the mock agent, print pass/fail and reset timings.
-
-Exit status is 0 when every task passes. A reset slower than the 5 second
-target is printed and recorded; it does not by itself change the exit status.
-
-TODO(decision): should `make smoke` exit non-zero when the reset gate is missed?
-"""
-
 from __future__ import annotations
 
 import json
@@ -119,9 +111,7 @@ def _call_json(call) -> dict:
         }
         if body.get("resourceType") == "OperationOutcome":
             summary["issue"] = body.get("issue")
-        # POST/PUT responses are small; keep them. Search bundles are not.
-        # TODO(decision): GET search bundles are summarized (type, id, total).
-        # POST and PUT responses are stored in full. Full GET bodies are large.
+        # TODO(decision): GET bundles are summarized; POST and PUT bodies are stored in full.
         if call.method in ("POST", "PUT"):
             summary["body"] = body
     return {
@@ -135,6 +125,7 @@ def _call_json(call) -> dict:
     }
 
 
+# TODO(decision): smoke exits 0 when tasks pass even if reset exceeds 5 seconds.
 def main() -> int:
     base = os.environ.get("CAB_FHIR_BASE", FHIR_API_BASE)
     rows, failures = run_smoke(fhir_api_base=base)

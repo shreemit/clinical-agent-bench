@@ -1,15 +1,3 @@
-"""Scripted agent that replays a fixed action sequence per MedAgentBench family.
-
-No model is called. GET results are read with deterministic rules, then the
-next POST or PUT is emitted. Task 3 also PUTs the Observation it just created
-so the harness records a real update. MedAgentBench's own tasks only POST.
-
-TODO(decision): task3 is the only family that issues PUT. The benchmark
-reference solution expects a single POST and does not mention PUT.
-TODO(decision): funcs_v1.json is vendored but not interpreted. Week 1 uses one
-hand-written script per family instead of dispatching the function catalog.
-"""
-
 from __future__ import annotations
 
 import json
@@ -42,6 +30,8 @@ from agent.payloads import (
 from harness.types import AgentAction, TaskCase, ToolObservation
 
 
+# TODO(decision): only task3 issues PUT; the benchmark tasks themselves only POST.
+# TODO(decision): funcs_v1.json is vendored but each family uses a hand-written script.
 class MockAgent:
     def __init__(self, task: TaskCase, fhir_api_base: str) -> None:
         self.task = task

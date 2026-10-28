@@ -1,5 +1,3 @@
-"""Live HAPI checks. Skipped unless the compose stack answers /fhir/metadata."""
-
 import os
 import urllib.error
 import urllib.request
@@ -44,14 +42,8 @@ def test_task1_read_and_task3_post_put_hit_hapi():
     assert write.calls[0].response_body["resourceType"] == "Observation"
 
 
+# TODO(decision): this does not fail when reset exceeds 5 seconds.
 def test_snapshot_restore_drops_a_write_and_records_timing():
-    """One real volume restore. Slow: it restarts HAPI.
-
-    The 5 second research gate is recorded on the receipt. This test does not
-    fail when the gate is missed.
-
-    TODO(decision): fail this test when under_5s is false once a faster reset exists.
-    """
 
     base = _base()
     harness = ExecHarness(base)
@@ -63,7 +55,7 @@ def test_snapshot_restore_drops_a_write_and_records_timing():
                 "resourceType": "Observation",
                 "status": "final",
                 "code": {"text": "cab-exec-marker"},
-                "valueString": "week1-reset-marker",
+                "valueString": "reset-marker",
                 "subject": {"reference": "Patient/S2380121"},
             },
         )

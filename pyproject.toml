@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clinical-agent-bench-exec"
 version = "0.1.0"
-description = "Week 1 execution harness for ClinicalAgentBench-Exec (mock agent, real FHIR writes)."
+description = "Execution harness for ClinicalAgentBench-Exec (mock agent, real FHIR writes)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

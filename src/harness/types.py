@@ -1,5 +1,3 @@
-"""Shared records for the Week 1 harness and mock agent."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -32,8 +30,6 @@ class AgentAction:
 
 @dataclass
 class ToolObservation:
-    """What the harness hands back after one FHIR call."""
-
     status: int
     body: Any
     headers: dict[str, str]

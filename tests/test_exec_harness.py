@@ -1,5 +1,3 @@
-"""Harness and mock-agent tests. No Docker and no FHIR server."""
-
 import json
 
 from agent.mock_agent import MockAgent

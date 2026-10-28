@@ -1,12 +1,3 @@
-"""Prefix-forking model runner. Not used in Week 1.
-
-Week 1 does not call any paid or hosted model API. The smoke test uses
-`agent.mock_agent.MockAgent`.
-
-TODO(decision): model ids in the lean plan (Grok 4.7, Composer 2.5, Haiku/Luna,
-Qwen3.5-9B) are not configured in Week 1.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -20,7 +11,6 @@ class PrefixCheckpoint:
     pending_post_call: dict
 
 
+# TODO(decision): no hosted model is configured; smoke uses the mock agent.
 def run_from_prefix(*args: object, **kwargs: object) -> dict:
-    raise NotImplementedError(
-        "prefix_runner is unwired in Week 1. No model API client is installed."
-    )
+    raise NotImplementedError("prefix_runner is not yet implemented.")

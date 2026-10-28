@@ -1,15 +1,3 @@
-"""Pure helpers for the scripted MedAgentBench v2 agent.
-
-The clock and the dosing thresholds are the ones written into every v2 task
-context (frozen at 2023-11-13T10:15:00+00:00). Codes that the context states
-literally are parsed from that string. Dose bands are not parsed out of the
-prose.
-
-TODO(decision): dosing bands are hardcoded from the single task5/task9 context
-text instead of being interpreted from free text. Every vendored v2 row in
-those families shares one context.
-"""
-
 from __future__ import annotations
 
 import re
@@ -37,12 +25,8 @@ def calculate_age(dob: datetime, today: datetime = FROZEN_NOW) -> int:
     return age
 
 
+# TODO(decision): last token is the family name; vendored task1 names are two tokens.
 def split_name(full_name: str) -> tuple[str, str]:
-    """Return (given, family).
-
-    TODO(decision): vendored task1 names are two tokens. The last token is
-    treated as the family name.
-    """
 
     parts = full_name.strip().split()
     if len(parts) < 2:
@@ -111,10 +95,7 @@ def latest_quantity(
     within_hours: float | None = None,
     now: datetime = FROZEN_NOW,
 ) -> tuple[datetime | None, float | None, str | None]:
-    """Most recent Observation valueQuantity.
-
-    `within_hours` keeps only samples at or after `now - within_hours`.
-    """
+    """Most recent valueQuantity, optionally limited to the last `within_hours`."""
 
     last_time: datetime | None = None
     last_value: float | None = None
@@ -134,12 +115,9 @@ def latest_quantity(
     return last_time, last_value, last_raw
 
 
+# TODO(decision): dose bands are hardcoded; every task5 and task9 row shares one context.
 def magnesium_dose(last_value: float) -> tuple[int, int] | None:
-    """Return (grams, hours) for IV magnesium, or None when no order is needed.
-
-    Bands from the task5 context: mild 1.5-1.9 -> 1g/1h, moderate 1-<1.5 ->
-    2g/2h, severe <1 -> 4g/4h. Values above 1.9 are not replaced.
-    """
+    """IV magnesium (grams, hours), or None when the level is above 1.9."""
 
     if last_value > 1.9:
         return None
@@ -155,7 +133,6 @@ def potassium_dose_meq(last_value: float) -> float | None:
 
     if last_value >= 3.5:
         return None
-    # One decimal matches the 10 mEq per 0.1 step without binary float noise.
     return round((3.5 - last_value) / 0.1 * 10, 1)
 
 

@@ -1,5 +1,3 @@
-"""Repair-loop stage evaluator. Week 3 component."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,4 +13,4 @@ class LoopGrade:
 
 
 def grade_loop(*args: object, **kwargs: object) -> LoopGrade:
-    raise NotImplementedError("loop_evaluator is a Week 3 stub.")
+    raise NotImplementedError("loop_evaluator is not yet implemented.")
