@@ -1,0 +1,15 @@
+# HAPI FHIR JPA (R4) with the MedAgentBench patient database.
+# The database file is not in git. `make load` copies /data/test_db.mv.db out of
+# the published image into ./docker/live, which this service bind-mounts at /data.
+# Image digest pinned to the tag resolved on 2026-10-28 (jyxsu6/medagentbench:latest).
+name: cab-exec
+
+services:
+  hapi:
+    image: jyxsu6/medagentbench@sha256:3fb83d7ed71c5476f9eb6212bd440a909ef7505922bbc757dc488a8fc0701966
+    container_name: cab-exec-hapi
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docker/live:/data
+    restart: "no"

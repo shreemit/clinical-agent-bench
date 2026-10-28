@@ -1,0 +1,19 @@
+ClinicalAgentBench-Exec
+Copyright (c) 2026 Shreemit Garimella
+
+This repository includes task files from MedAgentBench, used under the MIT
+License. Copyright (c) 2025 Stanford Machine Learning Group.
+Source: https://github.com/stanfordmlgroup/MedAgentBench
+Vendored files:
+  vendor/medagentbench/test_data_v2.json
+  vendor/medagentbench/funcs_v1.json
+  vendor/medagentbench/LICENSE
+
+The FHIR patient database is not redistributed in git. `make fetch` / `make load`
+pull the published image jyxsu6/medagentbench (HAPI FHIR JPA Server Starter,
+Apache-2.0, https://github.com/hapifhir/hapi-fhir-jpaserver-starter) and copy
+its /data/test_db.mv.db into a local Docker bind mount. That database is the
+MedAgentBench patient extract shipped by the benchmark authors.
+
+The Week 1 mock agent reimplements the benchmark's deterministic clinical
+steps (search, then POST/PUT). It does not copy MedAgentBench refsol.py.

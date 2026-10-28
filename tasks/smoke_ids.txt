@@ -1,0 +1,13 @@
+# One MedAgentBench v2 task from each of the ten families.
+# TODO(decision): these are the first row of each family (taskN_1), not a
+# clinically stratified sample. Week 1 only smokes the harness.
+task1_1
+task2_1
+task3_1
+task4_1
+task5_1
+task6_1
+task7_1
+task8_1
+task9_1
+task10_1
