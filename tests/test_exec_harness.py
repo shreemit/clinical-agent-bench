@@ -1,4 +1,5 @@
 import json
+from urllib.parse import parse_qs, urlparse
 
 from agent.mock_agent import MockAgent
 from harness.exec_harness import ExecHarness, evaluate_trial
@@ -188,6 +189,130 @@ def test_task6_averages_only_the_last_24_hours():
         task, MockAgent(task, "http://fhir.test/fhir/")
     )
     assert json.loads(record.finish_text) == [120.0]
+
+
+def test_task10_does_not_order_when_the_chart_has_no_result():
+    task = load_task_file()["task10_1"]
+
+    def handler(method, url, body):
+        if method == "GET":
+            return 200, {"resourceType": "Bundle", "type": "searchset", "total": 0, "entry": []}, {}
+        raise AssertionError("no write expected")
+
+    record = ExecHarness("http://fhir.test/fhir/", http=ScriptedHttp(handler)).run(
+        task, MockAgent(task, "http://fhir.test/fhir/")
+    )
+    assert record.passed, record.failure_reason
+    assert [call.method for call in record.calls] == ["GET"]
+    assert json.loads(record.finish_text) == [-1]
+
+
+def test_task10_orders_when_the_result_is_older_than_a_year():
+    task = load_task_file()["task10_1"]
+    when = "2020-01-01T00:00:00+00:00"
+
+    def handler(method, url, body):
+        if method == "GET":
+            return 200, _obs(7.1, when, "A1C"), {}
+        if method == "POST":
+            return 201, body, {"Location": url.rstrip("/") + "/99/_history/1"}
+        raise AssertionError(method)
+
+    record = ExecHarness("http://fhir.test/fhir/", http=ScriptedHttp(handler)).run(
+        task, MockAgent(task, "http://fhir.test/fhir/")
+    )
+    assert record.passed, record.failure_reason
+    assert [call.method for call in record.calls] == ["GET", "POST"]
+    assert record.calls[1].request_body["code"]["coding"][0]["code"] == "4548-4"
+    assert json.loads(record.finish_text) == [7.1, when]
+
+
+def test_task10_does_not_order_a_result_dated_exactly_one_year_ago():
+    task = load_task_file()["task10_1"]
+
+    def handler(method, url, body):
+        if method == "GET":
+            return 200, _obs(6.4, "2022-11-13T10:15:00+00:00", "A1C"), {}
+        raise AssertionError("no write expected")
+
+    record = ExecHarness("http://fhir.test/fhir/", http=ScriptedHttp(handler)).run(
+        task, MockAgent(task, "http://fhir.test/fhir/")
+    )
+    assert record.passed, record.failure_reason
+    assert [call.method for call in record.calls] == ["GET"]
+    assert json.loads(record.finish_text) == [6.4, "2022-11-13T10:15:00+00:00"]
+
+
+def test_latest_lab_queries_ask_for_the_newest_row():
+    tasks = load_task_file()
+    http = ScriptedHttp(_handler)
+    harness = ExecHarness("http://fhir.test/fhir/", http=http)
+    record = harness.run(tasks["task4_1"], MockAgent(tasks["task4_1"], harness.fhir_api_base))
+    assert record.passed, record.failure_reason
+    query = parse_qs(urlparse(record.calls[0].url).query)
+    assert query["_sort"] == ["-date"]
+    assert query["_count"] == ["1"]
+    assert query["date"] == ["ge2023-11-12T10:15:00+00:00"]
+
+    record = harness.run(tasks["task7_1"], MockAgent(tasks["task7_1"], harness.fhir_api_base))
+    query = parse_qs(urlparse(record.calls[0].url).query)
+    assert query["_sort"] == ["-date"]
+    assert query["_count"] == ["1"]
+    assert "date" not in query
+
+
+def test_task6_follows_the_next_page():
+    task = load_task_file()["task6_1"]
+    first = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "total": 2,
+        "link": [{"relation": "next", "url": "http://fhir.test/fhir/Observation?_getpages=2"}],
+        "entry": [
+            {"resource": {"effectiveDateTime": "2023-11-13T08:00:00+00:00", "valueQuantity": {"value": 80}}}
+        ],
+    }
+    second = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "total": 2,
+        "entry": [
+            {"resource": {"effectiveDateTime": "2023-11-13T09:00:00+00:00", "valueQuantity": {"value": 120}}}
+        ],
+    }
+
+    def handler(method, url, body):
+        if "_getpages=2" in url:
+            return 200, second, {}
+        return 200, first, {}
+
+    record = ExecHarness("http://fhir.test/fhir/", http=ScriptedHttp(handler)).run(
+        task, MockAgent(task, "http://fhir.test/fhir/")
+    )
+    assert record.passed, record.failure_reason
+    assert [call.method for call in record.calls] == ["GET", "GET"]
+    assert json.loads(record.finish_text) == [100.0]
+
+
+def test_task6_fails_when_the_page_is_short_of_total():
+    task = load_task_file()["task6_1"]
+
+    def handler(method, url, body):
+        return 200, {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": 4,
+            "entry": [
+                {"resource": {"effectiveDateTime": "2023-11-13T08:00:00+00:00", "valueQuantity": {"value": 80}}}
+            ],
+        }, {}
+
+    record = ExecHarness("http://fhir.test/fhir/", http=ScriptedHttp(handler)).run(
+        task, MockAgent(task, "http://fhir.test/fhir/")
+    )
+    assert not record.passed
+    assert record.finish_text is None
+    assert "total 4" in record.failure_reason
 
 
 def test_task8_note_comes_from_the_instruction():

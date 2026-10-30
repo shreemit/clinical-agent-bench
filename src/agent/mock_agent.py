@@ -7,8 +7,10 @@ from urllib.parse import urlencode
 
 from agent.fhir_rules import (
     FROZEN_NOW,
+    ONE_YEAR_BEFORE,
     bundle_resources,
     calculate_age,
+    extend_search,
     first_quoted,
     latest_quantity,
     magnesium_dose,
@@ -99,7 +101,7 @@ class MockAgent:
         mrn = self.task.eval_mrn or parse_mrn(self.task.instruction)
         if self.phase == 0:
             self.phase = 1
-            return _get(self.base, "Observation", {"patient": mrn, "code": "MG", "_count": "5000"})
+            return _get(self.base, "Observation", _lab_query(mrn, "MG", within_hours=24, latest_only=True))
         _, value, _ = latest_quantity(bundle_resources(observation.body if observation else None), within_hours=24)
         return _finish([value if value is not None else -1])
 
@@ -107,7 +109,7 @@ class MockAgent:
         mrn = self.task.eval_mrn or parse_mrn(self.task.instruction)
         if self.phase == 0:
             self.phase = 1
-            return _get(self.base, "Observation", {"patient": mrn, "code": "MG", "_count": "5000"})
+            return _get(self.base, "Observation", _lab_query(mrn, "MG", within_hours=24, latest_only=True))
         _, value, _ = latest_quantity(bundle_resources(observation.body if observation else None), within_hours=24)
         if self.phase == 1:
             self.memory["value"] = value
@@ -134,8 +136,12 @@ class MockAgent:
         mrn = self.task.eval_mrn or parse_mrn(self.task.instruction)
         if self.phase == 0:
             self.phase = 1
-            return _get(self.base, "Observation", {"patient": mrn, "code": "GLU", "_count": "5000"})
-        resources = bundle_resources(observation.body if observation else None)
+            self.memory["search"] = {"resources": []}
+            return _get(self.base, "Observation", _lab_query(mrn, "GLU", within_hours=24, latest_only=False))
+        nxt = extend_search(self.memory["search"], observation.body if observation else None)
+        if nxt:
+            return AgentAction(kind="GET", url=nxt)
+        resources = self.memory["search"]["resources"]
         total = 0.0
         count = 0
         cutoff = FROZEN_NOW - timedelta(hours=24)
@@ -153,7 +159,7 @@ class MockAgent:
         mrn = self.task.eval_mrn or parse_mrn(self.task.instruction)
         if self.phase == 0:
             self.phase = 1
-            return _get(self.base, "Observation", {"patient": mrn, "code": "GLU", "_count": "5000"})
+            return _get(self.base, "Observation", _lab_query(mrn, "GLU", within_hours=None, latest_only=True))
         _, value, _ = latest_quantity(bundle_resources(observation.body if observation else None))
         return _finish([value if value is not None else -1])
 
@@ -177,7 +183,7 @@ class MockAgent:
         mrn = self.task.eval_mrn or parse_mrn(self.task.instruction)
         if self.phase == 0:
             self.phase = 1
-            return _get(self.base, "Observation", {"patient": mrn, "code": "K", "_count": "5000"})
+            return _get(self.base, "Observation", _lab_query(mrn, "K", within_hours=None, latest_only=True))
         if self.phase == 1:
             _, value, _ = latest_quantity(bundle_resources(observation.body if observation else None))
             self.memory["value"] = value
@@ -201,13 +207,12 @@ class MockAgent:
         mrn = self.task.eval_mrn or parse_mrn(self.task.instruction)
         if self.phase == 0:
             self.phase = 1
-            return _get(self.base, "Observation", {"patient": mrn, "code": "A1C", "_count": "5000"})
+            return _get(self.base, "Observation", _lab_query(mrn, "A1C", within_hours=None, latest_only=True))
         if self.phase == 1:
             when, value, raw = latest_quantity(bundle_resources(observation.body if observation else None))
             self.memory["answer"] = [-1] if value is None else [value, raw]
-            from agent.fhir_rules import ONE_YEAR_BEFORE
-
-            needs_order = value is None or (when is not None and when < ONE_YEAR_BEFORE)
+            # Order only when a result date exists and is more than a year old.
+            needs_order = when is not None and when < ONE_YEAR_BEFORE
             if not needs_order:
                 return _finish(self.memory["answer"])
             self.phase = 2
@@ -216,6 +221,21 @@ class MockAgent:
                 service_request(mrn, "http://loinc.org", require_loinc(self.task.context)),
             )
         return _finish(self.memory["answer"])
+
+
+def _lab_query(mrn: str, code: str, *, within_hours: float | None, latest_only: bool) -> dict[str, str]:
+    """Search Observations, newest first.
+
+    `latest_only` asks for one row (`_count=1`). A 24-hour average leaves the
+    count high and follows `next`, because that answer needs every in-window value.
+    """
+
+    params: dict[str, str] = {"patient": mrn, "code": code, "_sort": "-date"}
+    if within_hours is not None:
+        cutoff = (FROZEN_NOW - timedelta(hours=within_hours)).isoformat()
+        params["date"] = f"ge{cutoff}"
+    params["_count"] = "1" if latest_only else "5000"
+    return params
 
 
 def _ok(status: int) -> bool:

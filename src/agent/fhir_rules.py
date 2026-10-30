@@ -84,10 +84,48 @@ def require_bp_code(context: str) -> str:
     return match.group(1)
 
 
+class IncompleteSearchError(Exception):
+    """The server reported more matches than the pages we were able to read."""
+
+
 def bundle_resources(body: Any) -> list[dict[str, Any]]:
     if not isinstance(body, dict):
         return []
     return [entry["resource"] for entry in body.get("entry") or [] if "resource" in entry]
+
+
+def next_page_url(body: Any) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    for link in body.get("link") or []:
+        if isinstance(link, dict) and link.get("relation") == "next" and link.get("url"):
+            return str(link["url"])
+    return None
+
+
+def extend_search(state: dict[str, Any], body: Any) -> str | None:
+    """Append one search page. Return the next URL, or None when the search is finished.
+
+    `state["total"]` is remembered when the server sends it. A short page is an
+    incomplete search only when that total is larger than the entries consumed
+    and there is no next link. A caller that asked for `_count=1` should not
+    use this; that page is the newest row, not the whole chart.
+    """
+
+    state.setdefault("resources", []).extend(bundle_resources(body))
+    total = body.get("total") if isinstance(body, dict) else None
+    if isinstance(total, int) and not isinstance(total, bool):
+        state["total"] = total
+    nxt = next_page_url(body)
+    if nxt:
+        return nxt
+    reported = state.get("total")
+    got = len(state["resources"])
+    if isinstance(reported, int) and reported > got:
+        raise IncompleteSearchError(
+            f"search total {reported} exceeds {got} entries and there is no next page"
+        )
+    return None
 
 
 def latest_quantity(
