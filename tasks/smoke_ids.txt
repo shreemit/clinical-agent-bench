@@ -1,0 +1,11 @@
+# TODO(decision): taskN_1 is the first row of each family, not a stratified sample.
+task1_1
+task2_1
+task3_1
+task4_1
+task5_1
+task6_1
+task7_1
+task8_1
+task9_1
+task10_1
