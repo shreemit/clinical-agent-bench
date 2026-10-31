@@ -12,13 +12,16 @@ t0="$(now_ms)"
 
 t_stop0="$(now_ms)"
 compose stop -t 8 hapi >/dev/null || true
+require_hapi_stopped
 t_stop1="$(now_ms)"
 
 t_copy0="$(now_ms)"
 own_path "$LIVE_DIR"
 own_path "$SNAPSHOT_DB"
-rm -f "$LIVE_DIR/test_db.mv.db" "$LIVE_DIR/test_db.lock.db" "$LIVE_DIR/test_db.trace.db"
-cp -a "$SNAPSHOT_DB" "$LIVE_DB"
+rm -f "$LIVE_DIR/test_db.lock.db" "$LIVE_DIR/test_db.trace.db" "${LIVE_DB}.tmp"
+cp -a "$SNAPSHOT_DB" "${LIVE_DB}.tmp"
+own_path "${LIVE_DB}.tmp"
+mv -f "${LIVE_DB}.tmp" "$LIVE_DB"
 own_path "$LIVE_DB"
 t_copy1="$(now_ms)"
 

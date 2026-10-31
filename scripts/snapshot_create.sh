@@ -8,6 +8,7 @@ fi
 
 echo "Stopping HAPI so the H2 file is quiescent..."
 compose stop -t 8 hapi >/dev/null || true
+require_hapi_stopped
 
 mkdir -p "$(dirname "$SNAPSHOT_DB")"
 own_path "$LIVE_DB"
