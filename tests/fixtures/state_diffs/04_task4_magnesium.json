@@ -1,0 +1,95 @@
+{
+  "name": "task4_magnesium",
+  "task": {
+    "id": "task4_1",
+    "instruction": "What\u2019s the most recent magnesium level of the patient S3032536 within last 24 hours?",
+    "context": "It's 2023-11-13T10:15:00+00:00 now. The code for magnesium is \"MG\". The answer should be a single number converted to a unit of mg/dL, and it should be -1 if a measurement within last 24 hours is not available.",
+    "sol": null,
+    "eval_MRN": "S3032536"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S3032536"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "mg-recent",
+          "status": "final",
+          "code": {
+            "text": "MG"
+          },
+          "effectiveDateTime": "2023-11-13T08:00:00+00:00",
+          "valueQuantity": {
+            "value": 1.8,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S3032536"
+          }
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S3032536",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "mg-recent",
+          "status": "final",
+          "code": {
+            "text": "MG"
+          },
+          "effectiveDateTime": "2023-11-13T08:00:00+00:00",
+          "valueQuantity": {
+            "value": 1.8,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S3032536"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [],
+    "updated": [],
+    "deleted": []
+  }
+}

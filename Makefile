@@ -1,6 +1,6 @@
 export PYTHONPATH := src
 
-.PHONY: sync fetch load up snapshot reset smoke test test-docker
+.PHONY: sync fetch load up snapshot reset smoke test test-docker baseline agreement
 
 sync:
 	uv sync --extra dev
@@ -28,3 +28,9 @@ test:
 
 test-docker:
 	uv run pytest -m docker
+
+baseline:
+	uv run python -m runners.baseline --k 1
+
+agreement:
+	uv run python -m analysis.agreement $(or $(RESULTS),runs/baseline/results.jsonl)

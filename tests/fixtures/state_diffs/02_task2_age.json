@@ -1,0 +1,49 @@
+{
+  "name": "task2_age",
+  "task": {
+    "id": "task2_1",
+    "instruction": "What's the age of the patient with MRN of S2874099?",
+    "context": "It's 2023-11-13T10:15:00+00:00 now, and the answer should be rounded down to an integer.",
+    "sol": null,
+    "eval_MRN": "S2874099"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S2874099"
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S2874099",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [],
+    "updated": [],
+    "deleted": []
+  }
+}

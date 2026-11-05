@@ -1,0 +1,224 @@
+{
+  "name": "task9_order",
+  "task": {
+    "id": "task9_1",
+    "instruction": "Check patient S3241217's most recent potassium level. If low, then order replacement potassium according to dosing instructions. Also pair this order with a morning serum potassium level to be completed the next day at 8am. \n",
+    "context": "It's 2023-11-13T10:15:00+00:00 now. The code for potassium is \"K\".The NDC for replacement potassium is 40032-917-01. Dosing instructions: for every 0.1 mEq/L (or mmol/L) below threshold, order 10 mEq potassium oral repletion) to reach a goal of 3.5 serum level. The LOINC code for serum potassium level is 2823-3.",
+    "sol": null,
+    "eval_MRN": "S3241217"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S3241217"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "k-recent",
+          "status": "final",
+          "code": {
+            "text": "K"
+          },
+          "effectiveDateTime": "2023-11-12T08:00:00+00:00",
+          "valueQuantity": {
+            "value": 3.0,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S3241217"
+          }
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S3241217",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "k-recent",
+          "status": "final",
+          "code": {
+            "text": "K"
+          },
+          "effectiveDateTime": "2023-11-12T08:00:00+00:00",
+          "valueQuantity": {
+            "value": 3.0,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S3241217"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "MedicationRequest",
+          "status": "active",
+          "intent": "order",
+          "medicationCodeableConcept": {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/sid/ndc",
+                "code": "40032-917-01"
+              }
+            ]
+          },
+          "subject": {
+            "reference": "Patient/S3241217"
+          },
+          "authoredOn": "2023-11-13T10:15:00+00:00",
+          "dosageInstruction": [
+            {
+              "route": {
+                "text": "oral"
+              },
+              "doseAndRate": [
+                {
+                  "doseQuantity": {
+                    "value": 50,
+                    "unit": "mEq"
+                  }
+                }
+              ]
+            }
+          ],
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules",
+          "id": "srv-1"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "ServiceRequest",
+          "status": "active",
+          "intent": "order",
+          "priority": "stat",
+          "code": {
+            "coding": [
+              {
+                "system": "http://loinc.org",
+                "code": "2823-3"
+              }
+            ]
+          },
+          "subject": {
+            "reference": "Patient/S3241217"
+          },
+          "authoredOn": "2023-11-13T10:15:00+00:00",
+          "occurrenceDateTime": "2023-11-14T08:00:00+00:00",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules",
+          "id": "srv-2"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [
+      {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "intent": "order",
+        "medicationCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/sid/ndc",
+              "code": "40032-917-01"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/S3241217"
+        },
+        "authoredOn": "2023-11-13T10:15:00+00:00",
+        "dosageInstruction": [
+          {
+            "route": {
+              "text": "oral"
+            },
+            "doseAndRate": [
+              {
+                "doseQuantity": {
+                  "value": 50,
+                  "unit": "mEq"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "resourceType": "ServiceRequest",
+        "status": "active",
+        "intent": "order",
+        "priority": "stat",
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "2823-3"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/S3241217"
+        },
+        "authoredOn": "2023-11-13T10:15:00+00:00",
+        "occurrenceDateTime": "2023-11-14T08:00:00+00:00"
+      }
+    ],
+    "updated": [],
+    "deleted": []
+  }
+}
