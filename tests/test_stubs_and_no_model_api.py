@@ -5,7 +5,6 @@ import pytest
 from analysis.autonomy_certificate import autonomy_certificate
 from fhir.reset_controller import reset_patient_after_trial
 from graders.loop_evaluator import grade_loop
-from graders.state_diff_grader import grade_trial_state
 from harness.clinician_gate import ClinicianGate
 from harness.idempotency import attach_idempotency
 from proxy.fault_proxy import proxy_post
@@ -19,8 +18,6 @@ def test_unimplemented_modules_raise():
         attach_idempotency({}, {}, "t", "task", "none")
     with pytest.raises(NotImplementedError):
         proxy_post("Observation", b"{}", {})
-    with pytest.raises(NotImplementedError):
-        grade_trial_state({}, {}, {}, "")
     with pytest.raises(NotImplementedError):
         grade_loop()
     with pytest.raises(NotImplementedError):

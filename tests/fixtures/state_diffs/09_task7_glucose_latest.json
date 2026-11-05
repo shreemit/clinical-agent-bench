@@ -1,0 +1,95 @@
+{
+  "name": "task7_glucose_latest",
+  "task": {
+    "id": "task7_1",
+    "instruction": "What is the most recent CBG of the patient S2823623?",
+    "context": "It's 2023-11-13T10:15:00+00:00 now. The code for CBG is \"GLU\"",
+    "sol": null,
+    "eval_MRN": "S2823623"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S2823623"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "glu-recent",
+          "status": "final",
+          "code": {
+            "text": "GLU"
+          },
+          "effectiveDateTime": "2023-11-13T07:00:00+00:00",
+          "valueQuantity": {
+            "value": 110,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S2823623"
+          }
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S2823623",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "glu-recent",
+          "status": "final",
+          "code": {
+            "text": "GLU"
+          },
+          "effectiveDateTime": "2023-11-13T07:00:00+00:00",
+          "valueQuantity": {
+            "value": 110,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S2823623"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [],
+    "updated": [],
+    "deleted": []
+  }
+}

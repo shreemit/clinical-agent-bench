@@ -1,0 +1,141 @@
+{
+  "name": "task5_hold",
+  "task": {
+    "id": "task5_3",
+    "instruction": "Check patient S0636132's last serum magnesium level within last 24 hours. If low, then order replacement IV magnesium according to dosing instructions. If no magnesium level has been recorded in the last 24 hours, don't order anything.\n",
+    "context": "It's 2023-11-13T10:15:00+00:00 now. The code for magnesium is \"MG\". The NDC for replacement IV magnesium is 0338-1715-40. Dosing instructions: (1) Mild deficiency (eg, serum magnesium 1.5 to 1.9 mg/dL):\nIV: 1 g over 1 hour.\n(2) Moderate deficiency (eg, serum magnesium 1 to <1.5 mg/dL):\nIV: 2 g over 2 hours.\n(3) Severe deficiency (eg, serum magnesium <1 mg/dL):\nIV: 4 g over 4 hours.\n",
+    "sol": null,
+    "eval_MRN": "S0636132"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S0636132"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "mg-old",
+          "status": "final",
+          "code": {
+            "text": "MG"
+          },
+          "effectiveDateTime": "2023-11-01T00:00:00+00:00",
+          "valueQuantity": {
+            "value": 0.6,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S0636132"
+          }
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "mg-recent",
+          "status": "final",
+          "code": {
+            "text": "MG"
+          },
+          "effectiveDateTime": "2023-11-13T08:00:00+00:00",
+          "valueQuantity": {
+            "value": 2.4,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S0636132"
+          }
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S0636132",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "mg-old",
+          "status": "final",
+          "code": {
+            "text": "MG"
+          },
+          "effectiveDateTime": "2023-11-01T00:00:00+00:00",
+          "valueQuantity": {
+            "value": 0.6,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S0636132"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "mg-recent",
+          "status": "final",
+          "code": {
+            "text": "MG"
+          },
+          "effectiveDateTime": "2023-11-13T08:00:00+00:00",
+          "valueQuantity": {
+            "value": 2.4,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S0636132"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [],
+    "updated": [],
+    "deleted": []
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "name": "task6_glucose_average",
+  "task": {
+    "id": "task6_1",
+    "instruction": "What is the average CBG of the patient S6307599 over the last 24 hours?",
+    "context": "It's 2023-11-13T10:15:00+00:00 now. The code for CBG is \"GLU\". The answer should be a single number converted to a unit of mg/dL, and it should be -1 if a measurement within last 24 hours is not available.",
+    "sol": null,
+    "eval_MRN": "S6307599"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S6307599"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "glu-a",
+          "status": "final",
+          "code": {
+            "text": "GLU"
+          },
+          "effectiveDateTime": "2023-11-13T08:00:00+00:00",
+          "valueQuantity": {
+            "value": 100,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S6307599"
+          }
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "glu-b",
+          "status": "final",
+          "code": {
+            "text": "GLU"
+          },
+          "effectiveDateTime": "2023-11-13T09:00:00+00:00",
+          "valueQuantity": {
+            "value": 140,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S6307599"
+          }
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S6307599",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "glu-a",
+          "status": "final",
+          "code": {
+            "text": "GLU"
+          },
+          "effectiveDateTime": "2023-11-13T08:00:00+00:00",
+          "valueQuantity": {
+            "value": 100,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S6307599"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "glu-b",
+          "status": "final",
+          "code": {
+            "text": "GLU"
+          },
+          "effectiveDateTime": "2023-11-13T09:00:00+00:00",
+          "valueQuantity": {
+            "value": 140,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S6307599"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [],
+    "updated": [],
+    "deleted": []
+  }
+}
