@@ -47,7 +47,7 @@ A smoke task passes when every FHIR call returns a 2xx status and the agent emit
 
 `grade_trial_state` compares one patient's chart before and after a trial. The trial passes when the resources created, updated, and deleted match the expected fields. Server `meta`, narrative `text`, `language`, and `implicitRules` are ignored. Numbers match within 0.1. The finish string is not part of the grade.
 
-Tasks 1, 2, 4, 6, and 7 expect no chart change. Task 3 records a blood-pressure Observation. Tasks 5 and 9 write orders only when the pre-trial lab is low. Task 8 writes one referral. Task 10 orders an HbA1c when the latest result is missing or older than one year. Medication and service payloads use FHIR R4 shapes: `route` is a CodeableConcept and `note` is a list.
+Tasks 1, 2, 4, 6, and 7 expect no chart change. Task 3 records a blood-pressure Observation. Tasks 5 and 9 write orders only when the pre-trial lab is low. Task 8 writes one referral. Task 10 orders an HbA1c only when a result is on the chart and its date is older than one year; no measurement means no order. Medication and service payloads use FHIR R4 shapes: `route` is a CodeableConcept and `note` is a list.
 
 `tests/fixtures/state_diffs/` holds 14 golden before/after charts covering those task types. `collect_patient_state` reads Patient, Observation, MedicationRequest, and ServiceRequest from HAPI for a live trial.
 
@@ -64,7 +64,7 @@ The command reads `OPENAI_API_KEY` from the environment and exits with an error 
 
 The first trial of each task writes `prefixes/<task_id>.json`: messages before the first `POST` or `PUT`, and that pending write. A task that never writes stores the full transcript and a null pending write.
 
-Every trial is graded from the chart diff. Place the authors' `refsol.py` at `vendor/medagentbench/refsol.py`, or pass `--refsol`. The file should define `task1` … `task10(case_data, results, fhir_api_base)`, or a single `eval` function. `results.history` items have `role` (`agent` or `user`) and `content`. `results.result` is the `FINISH` payload. An accepted write is an agent turn `POST <url>` plus JSON, followed by a user turn that contains `POST request accepted`. If the file is absent the run prints `refsol skipped: <path> is not present` and still records the state grade. `analysis.agreement` prints the 2×2 table of transcript pass/fail against state pass/fail.
+Every trial is graded from the chart diff. Place the authors' `refsol.py` at `vendor/medagentbench/refsol.py`, or pass `--refsol`. The file should define `task1` … `task10(case_data, results, fhir_api_base)`, or a single `eval` function. `results.history` items have `role` (`agent` or `user`) and `content`. `results.result` is the `FINISH` payload. An accepted write is an agent turn `POST <url>` plus JSON, followed by a user turn that contains `POST request accepted`. If the file is absent the run prints `refsol skipped: <path> is not present` and still records the state grade. If the reference grader raises, that trial's transcript grade is left unset and the row is omitted from the agreement table. The authors' checker expects a string `route` and an object `note`, so a chart-correct MedicationRequest or ServiceRequest can disagree with it or raise. A trial that never finishes does not count as a state pass. Completed trials are written to `results.jsonl` as they finish, including when a later reset fails. `analysis.agreement` prints the 2×2 table of transcript pass/fail against state pass/fail.
 
 ## Layout
 

@@ -202,7 +202,7 @@ def gold_spec_for_task(task: TaskCase, pre_bundle: dict) -> dict:
         )
     if family == "task10":
         when, value = _latest_value(pre_bundle, "A1C", within_hours=None)
-        if value is not None and when is not None and when >= ONE_YEAR_BEFORE:
+        if value is None or when is None or when >= ONE_YEAR_BEFORE:
             return _empty_gold()
         return _created(
             service_request(mrn, "http://loinc.org", require_loinc(task.context))

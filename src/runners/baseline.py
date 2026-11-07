@@ -312,22 +312,28 @@ def run_baseline(
                     refsol_status = "graded"
                     refsol_message = None
                 except Exception as error:
-                    refsol_passed = False
+                    refsol_passed = None
                     refsol_status = "error"
                     refsol_message = str(error)
+            mismatches = list(state["mismatches"])
+            state_passed = bool(state["passed"])
+            if record.finish_text is None and record.failure_reason:
+                state_passed = False
+                if state["passed"]:
+                    mismatches.append(f"trial did not finish: {record.failure_reason}")
             if trial == 0:
                 (prefix_dir / f"{task.id}.json").write_text(
                     json.dumps(agent.prefix(task.id), indent=2) + "\n"
                 )
-            rows.append(
-                {
+            row = {
                     "task_id": task.id,
                     "trial": trial,
                     "model": model,
                     "reset": not no_reset,
                     "contaminated": sorted(pre_ids) != sorted(initial_ids),
-                    "state_passed": state["passed"],
-                    "mismatches": state["mismatches"],
+                    "state_passed": state_passed,
+                    "failure_reason": record.failure_reason,
+                    "mismatches": mismatches,
                     "created": [_label(resource) for resource in state["created"]],
                     "updated": [
                         f"{item['resourceType']}/{item['id']}" for item in state["updated"]
@@ -341,12 +347,17 @@ def run_baseline(
                     "rounds": record.rounds,
                     "pre_ids": pre_ids,
                     "post_ids": resource_ids(post),
-                }
-            )
-    results_path = output_dir / "results.jsonl"
-    results_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    (output_dir / "agreement.txt").write_text(format_agreement(agreement_counts(rows)) + "\n")
+            }
+            rows.append(row)
+            _write_outputs(output_dir, rows)
     return rows
+
+
+def _write_outputs(output_dir: Path, rows: list[dict]) -> None:
+    """Write results and the agreement table for every trial finished so far."""
+
+    (output_dir / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (output_dir / "agreement.txt").write_text(format_agreement(agreement_counts(rows)) + "\n")
 
 
 def _label(resource: dict) -> str:

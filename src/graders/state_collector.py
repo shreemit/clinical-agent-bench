@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent.fhir_rules import bundle_resources, next_page_url
+from agent.fhir_rules import extend_search
 from harness.http_client import HttpClient
 
 _SEARCH_TYPES = ("Observation", "MedicationRequest", "ServiceRequest")
@@ -40,7 +40,7 @@ def _read_patient(http: HttpClient, url: str) -> dict | None:
 
 
 def _search_all(http: HttpClient, url: str) -> list[dict]:
-    found: list[dict] = []
+    state: dict = {"resources": []}
     next_url: str | None = url
     pages = 0
     while next_url:
@@ -51,9 +51,8 @@ def _search_all(http: HttpClient, url: str) -> list[dict]:
         if result.status < 200 or result.status >= 300:
             raise RuntimeError(f"GET {next_url} returned status {result.status}")
         body = result.body if isinstance(result.body, dict) else {}
-        found.extend(bundle_resources(body))
-        next_url = next_page_url(body)
-    return found
+        next_url = extend_search(state, body)
+    return list(state["resources"])
 
 
 def _dedupe(resources: list[dict]) -> list[dict]:

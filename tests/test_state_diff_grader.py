@@ -2,7 +2,7 @@ import copy
 import json
 from pathlib import Path
 
-from agent.fhir_rules import ONE_YEAR_BEFORE
+from agent.fhir_rules import ONE_YEAR_BEFORE, IncompleteSearchError
 from graders.state_collector import collect_patient_state
 from graders.state_diff_grader import (
     diff_bundles,
@@ -196,9 +196,12 @@ def test_protocol_holds_orders_for_stale_or_missing_labs():
     task9 = tasks["task9_1"]
     assert gold_spec_for_task(task9, _bundle([]))["created"] == []
     task10 = tasks["task10_1"]
-    assert len(gold_spec_for_task(task10, _bundle([]))["created"]) == 1
+    assert gold_spec_for_task(task10, _bundle([]))["created"] == []
     exact = _bundle([_obs("a1c", 6.1, ONE_YEAR_BEFORE.isoformat(), "A1C")])
     assert gold_spec_for_task(task10, exact)["created"] == []
+    old = _bundle([_obs("a1c", 8.2, "2020-01-01T00:00:00+00:00", "A1C")])
+    ordered = gold_spec_for_task(task10, old)["created"]
+    assert [item["resourceType"] for item in ordered] == ["ServiceRequest"]
 
 
 def test_fourteen_gold_fixtures_pass():
@@ -329,6 +332,37 @@ def test_collector_pages_patient_resources():
     assert any("/Observation?patient=S1&_count=200" in url for url in http.urls)
     assert any("_getpages=2" in url for url in http.urls)
     assert http.urls[0].endswith("/Patient/S1")
+
+
+def test_collector_rejects_a_short_search():
+    class Short:
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            if "/Patient/" in url and "?" not in url:
+                return HttpResult(200, {"resourceType": "Patient", "id": "S1"}, {}, 1)
+            if "/Observation?" in url:
+                return HttpResult(
+                    200,
+                    {
+                        "resourceType": "Bundle",
+                        "type": "searchset",
+                        "total": 4,
+                        "entry": [
+                            {"resource": {"resourceType": "Observation", "id": "only", "status": "final"}}
+                        ],
+                    },
+                    {},
+                    1,
+                )
+            return HttpResult(
+                200, {"resourceType": "Bundle", "type": "searchset", "total": 0, "entry": []}, {}, 1
+            )
+
+    try:
+        collect_patient_state(Short(), "http://fhir.test/fhir/", "S1")
+    except IncompleteSearchError as error:
+        assert "total 4" in str(error)
+    else:
+        raise AssertionError("expected IncompleteSearchError")
 
 
 def test_collector_raises_on_search_error():

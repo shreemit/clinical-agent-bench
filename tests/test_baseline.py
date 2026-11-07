@@ -391,3 +391,96 @@ def test_wrong_dose_fails_the_state_grade(tmp_path):
         reset=chart.reset,
     )
     assert rows[0]["state_passed"] is False
+
+
+def test_unfinished_trial_does_not_state_pass_a_read_task(tmp_path):
+    task = load_task_file()["task1_1"]
+    chart = Chart(task.eval_mrn)
+
+    class Broken:
+        def complete(self, messages, model):
+            del messages, model
+            raise RuntimeError("model unavailable")
+
+    rows = run_baseline(
+        [task],
+        k=1,
+        output_dir=tmp_path / "dead",
+        model=DEFAULT_MODEL,
+        client=Broken(),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=chart.reset,
+    )
+    assert rows[0]["finish_text"] is None
+    assert rows[0]["failure_reason"]
+    assert rows[0]["state_passed"] is False
+    assert any("trial did not finish" in item for item in rows[0]["mismatches"])
+
+
+def test_refsol_error_is_omitted_from_the_agreement_table(tmp_path):
+    task = load_task_file()["task8_1"]
+    body = service_request(
+        task.eval_mrn,
+        "http://snomed.info/sct",
+        require_snomed(task.context),
+        note=first_quoted(task.instruction),
+    )
+    chart = Chart(task.eval_mrn)
+    refsol = _refsol(
+        tmp_path / "refsol.py",
+        "def task8(case_data, results, fhir_api_base):\n"
+        "    raise TypeError('note is a list, not an object')\n",
+    )
+    rows = run_baseline(
+        [task],
+        k=1,
+        output_dir=tmp_path / "refsol-error",
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(_post_then_finish(body, "http://fhir.test/fhir/ServiceRequest")),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=refsol,
+        reset=chart.reset,
+    )
+    assert rows[0]["state_passed"] is True
+    assert rows[0]["refsol_passed"] is None
+    assert rows[0]["refsol_status"] == "error"
+    assert "note is a list" in rows[0]["refsol_message"]
+    summary = agreement_counts(rows)
+    assert summary["total"] == 0
+    assert summary["skipped"] == 1
+
+
+def test_reset_failure_keeps_trials_already_written(tmp_path):
+    task = load_task_file()["task2_1"]
+    chart = Chart(task.eval_mrn)
+    calls = {"n": 0}
+
+    def reset():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("snapshot restore failed")
+        chart.reset()
+
+    def reply_for(assistant_turns, messages, model):
+        del assistant_turns, messages, model
+        return "FINISH\n[1]"
+
+    with pytest.raises(RuntimeError, match="snapshot restore failed"):
+        run_baseline(
+            [task],
+            k=2,
+            output_dir=tmp_path / "partial",
+            model=DEFAULT_MODEL,
+            client=ScriptedChat(reply_for),
+            fhir_api_base="http://fhir.test/fhir/",
+            http=chart,
+            refsol_path=tmp_path / "absent.py",
+            reset=reset,
+        )
+    saved = load_results(tmp_path / "partial" / "results.jsonl")
+    assert len(saved) == 1
+    assert saved[0]["trial"] == 0
+    assert saved[0]["task_id"] == "task2_1"
