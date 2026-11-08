@@ -12,7 +12,7 @@ from agent.fhir_rules import bundle_resources, parse_mrn
 from analysis.agreement import agreement_counts, format_agreement
 from fhir.snapshot_reset import restore_snapshot
 from graders.refsol_grader import grade_with_refsol, load_refsol, refsol_skip_message
-from graders.state_collector import collect_patient_state
+from graders.state_collector import collect_patient_state, merge_resources, read_locations
 from graders.state_diff_grader import gold_spec_for_task, grade_trial_state
 from harness.exec_harness import ExecHarness
 from harness.http_client import HttpClient, UrllibHttpClient
@@ -294,7 +294,10 @@ def run_baseline(
                 initial_ids = pre_ids
             agent = PromptAgent(task, fhir_api_base, client, model)
             record = harness.run(task, agent)
-            post = collect_patient_state(http, fhir_api_base, patient_id)
+            post = merge_resources(
+                collect_patient_state(http, fhir_api_base, patient_id),
+                read_locations(http, fhir_api_base, _write_locations(record)),
+            )
             gold = gold_spec_for_task(task, pre)
             state = grade_trial_state(pre, post, gold, record.finish_text or "")
             refsol_passed: bool | None = None
@@ -351,6 +354,16 @@ def run_baseline(
             rows.append(row)
             _write_outputs(output_dir, rows)
     return rows
+
+
+def _write_locations(record) -> list[str]:
+    """Location URLs for writes HAPI accepted."""
+
+    locations: list[str] = []
+    for call in record.calls:
+        if call.method in ("POST", "PUT") and call.location and 200 <= call.status < 300:
+            locations.append(call.location)
+    return locations
 
 
 def _write_outputs(output_dir: Path, rows: list[dict]) -> None:

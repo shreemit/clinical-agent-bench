@@ -6,7 +6,9 @@ import pytest
 
 from agent.mock_agent import MockAgent
 from fhir.snapshot_reset import restore_snapshot
+from graders.state_collector import collect_patient_state
 from harness.exec_harness import ExecHarness
+from harness.http_client import UrllibHttpClient
 from harness.types import AgentAction
 from tasks_io import load_task_file
 
@@ -71,3 +73,31 @@ def test_snapshot_restore_drops_a_write_and_records_timing():
 
     _, fetched = harness.step(AgentAction(kind="GET", url=f"{base}Observation/{marker_id}?_format=json"))
     assert fetched.status == 404, fetched.status
+
+
+def test_collector_sees_an_observation_created_after_the_search_cache_is_warm():
+    base = _base()
+    http = UrllibHttpClient(timeout=180)
+    patient = "S2380121"
+    before = collect_patient_state(http, base, patient)
+    before_ids = {entry["resource"].get("id") for entry in before["entry"]}
+    harness = ExecHarness(base, http=http)
+    _, created = harness.step(
+        AgentAction(
+            kind="POST",
+            url=base + "Observation",
+            body={
+                "resourceType": "Observation",
+                "status": "final",
+                "code": {"text": "BP"},
+                "valueString": "collector-sees-me",
+                "subject": {"reference": f"Patient/{patient}"},
+            },
+        )
+    )
+    assert created.status == 201, created.response_body
+    new_id = created.response_body["id"]
+    assert new_id not in before_ids
+    after = collect_patient_state(http, base, patient)
+    after_ids = {entry["resource"].get("id") for entry in after["entry"]}
+    assert new_id in after_ids

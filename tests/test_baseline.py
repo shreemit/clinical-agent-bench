@@ -42,6 +42,17 @@ class Chart:
             if not found:
                 return HttpResult(404, {"resourceType": "OperationOutcome"}, {}, 1)
             return HttpResult(200, found[0], {}, 1)
+        if method == "GET" and "?" not in url:
+            kind, _, resource_id = url.rstrip("/").rpartition("/")
+            kind = kind.rstrip("/").rsplit("/", 1)[-1]
+            found = [
+                item
+                for item in self.resources
+                if item.get("resourceType") == kind and item.get("id") == resource_id
+            ]
+            if found:
+                return HttpResult(200, found[0], {}, 1)
+            return HttpResult(404, {"resourceType": "OperationOutcome"}, {}, 1)
         if method == "GET":
             kind = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
             matches = [item for item in self.resources if item.get("resourceType") == kind]
@@ -484,3 +495,42 @@ def test_reset_failure_keeps_trials_already_written(tmp_path):
     assert len(saved) == 1
     assert saved[0]["trial"] == 0
     assert saved[0]["task_id"] == "task2_1"
+
+
+def test_stale_search_still_grades_a_write_from_its_location(tmp_path):
+    task = load_task_file()["task3_1"]
+    posted = blood_pressure_observation(task.eval_mrn, "118/77 mmHg", "BP")
+
+    class StaleSearch:
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            if method == "GET" and f"/Patient/{task.eval_mrn}" in url and "?" not in url:
+                return HttpResult(200, {"resourceType": "Patient", "id": task.eval_mrn}, {}, 1)
+            if method == "POST":
+                resource = json.loads(json.dumps(body))
+                resource["id"] = "99"
+                self.resource = resource
+                return HttpResult(201, resource, {"Location": url.rstrip("/") + "/99/_history/1"}, 1)
+            if method == "GET" and url.rstrip("/").endswith("/Observation/99"):
+                return HttpResult(200, self.resource, {}, 1)
+            if method == "GET":
+                return HttpResult(
+                    200,
+                    {"resourceType": "Bundle", "type": "searchset", "total": 0, "entry": []},
+                    {},
+                    1,
+                )
+            raise AssertionError(f"{method} {url}")
+
+    rows = run_baseline(
+        [task],
+        k=1,
+        output_dir=tmp_path / "stale",
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(_post_then_finish(posted, "http://fhir.test/fhir/Observation")),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=StaleSearch(),
+        refsol_path=tmp_path / "absent.py",
+        reset=lambda: None,
+    )
+    assert rows[0]["state_passed"] is True
+    assert any(item.startswith("Observation/") for item in rows[0]["created"])

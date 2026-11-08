@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from agent.fhir_rules import ONE_YEAR_BEFORE, IncompleteSearchError
-from graders.state_collector import collect_patient_state
+from graders.state_collector import collect_patient_state, merge_resources, read_locations
 from graders.state_diff_grader import (
     diff_bundles,
     gold_spec_for_task,
@@ -282,9 +282,11 @@ def test_mutating_a_gold_chart_fails():
 class _PagingHttp:
     def __init__(self):
         self.urls = []
+        self.headers = []
 
     def request(self, method, url, body=None, headers=None, timeout=None):
         self.urls.append(url)
+        self.headers.append(headers)
         if url.endswith("/Patient/S1"):
             return HttpResult(200, {"resourceType": "Patient", "id": "S1"}, {}, 1)
         if "_getpages=2" in url:
@@ -329,7 +331,10 @@ def test_collector_pages_patient_resources():
     bundle = collect_patient_state(http, "http://fhir.test/fhir", "S1")
     ids = [entry["resource"]["id"] for entry in bundle["entry"]]
     assert ids == ["S1", "a", "b"]
-    assert any("/Observation?patient=S1&_count=200" in url for url in http.urls)
+    assert any(
+        "/Observation?patient=S1&_count=200&_sort=-_lastUpdated" in url for url in http.urls
+    )
+    assert all((headers or {}).get("Cache-Control") == "no-cache" for headers in http.headers)
     assert any("_getpages=2" in url for url in http.urls)
     assert http.urls[0].endswith("/Patient/S1")
 
@@ -363,6 +368,74 @@ def test_collector_rejects_a_short_search():
         assert "total 4" in str(error)
     else:
         raise AssertionError("expected IncompleteSearchError")
+
+
+def test_collector_bypasses_a_stale_search_cache():
+    class StaleCache:
+        def __init__(self):
+            self.searches = []
+
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            if "/Patient/" in url and "?" not in url:
+                return HttpResult(200, {"resourceType": "Patient", "id": "S1"}, {}, 1)
+            if "/Observation?" in url:
+                fresh = "no-cache" in ((headers or {}).get("Cache-Control") or "")
+                self.searches.append(fresh)
+                entries = [{"resource": {"resourceType": "Observation", "id": "old", "status": "final"}}]
+                if fresh:
+                    entries.append(
+                        {
+                            "resource": {
+                                "resourceType": "Observation",
+                                "id": "new",
+                                "status": "final",
+                                "valueString": "118/77 mmHg",
+                            }
+                        }
+                    )
+                return HttpResult(
+                    200,
+                    {"resourceType": "Bundle", "type": "searchset", "total": len(entries), "entry": entries},
+                    {},
+                    1,
+                )
+            return HttpResult(
+                200, {"resourceType": "Bundle", "type": "searchset", "total": 0, "entry": []}, {}, 1
+            )
+
+    http = StaleCache()
+    bundle = collect_patient_state(http, "http://fhir.test/fhir/", "S1")
+    ids = [entry["resource"]["id"] for entry in bundle["entry"]]
+    assert "new" in ids
+    assert http.searches and all(http.searches)
+
+
+def test_read_location_merges_over_a_stale_snapshot():
+    class Direct:
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            self.url = url
+            return HttpResult(
+                200,
+                {"resourceType": "Observation", "id": "786002", "valueString": "118/77 mmHg"},
+                {},
+                1,
+            )
+
+    http = Direct()
+    found = read_locations(
+        http,
+        "http://fhir.test/fhir/",
+        ["http://fhir.test/fhir/Observation/786002/_history/1"],
+    )
+    assert http.url == "http://fhir.test/fhir/Observation/786002"
+    stale = {
+        "resourceType": "Bundle",
+        "type": "collection",
+        "entry": [{"resource": {"resourceType": "Observation", "id": "786002", "valueString": "old"}}],
+    }
+    merged = merge_resources(stale, found)
+    values = [entry["resource"]["valueString"] for entry in merged["entry"]]
+    assert values == ["118/77 mmHg"]
 
 
 def test_collector_raises_on_search_error():

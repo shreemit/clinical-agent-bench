@@ -49,7 +49,7 @@ A smoke task passes when every FHIR call returns a 2xx status and the agent emit
 
 Tasks 1, 2, 4, 6, and 7 expect no chart change. Task 3 records a blood-pressure Observation. Tasks 5 and 9 write orders only when the pre-trial lab is low. Task 8 writes one referral. Task 10 orders an HbA1c only when a result is on the chart and its date is older than one year; no measurement means no order. Medication and service payloads use FHIR R4 shapes: `route` is a CodeableConcept and `note` is a list.
 
-`tests/fixtures/state_diffs/` holds 14 golden before/after charts covering those task types. `collect_patient_state` reads Patient, Observation, MedicationRequest, and ServiceRequest from HAPI for a live trial.
+`tests/fixtures/state_diffs/` holds 14 golden before/after charts covering those task types. `collect_patient_state` reads Patient, Observation, MedicationRequest, and ServiceRequest from HAPI for a live trial. Searches send `Cache-Control: no-cache` and sort by `_lastUpdated`, because HAPI otherwise reuses a cached search from before the write. The baseline also re-reads each accepted write Location into the after-state.
 
 ## Model baseline
 
