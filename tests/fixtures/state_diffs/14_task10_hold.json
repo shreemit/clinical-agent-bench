@@ -1,0 +1,133 @@
+{
+  "name": "task10_hold",
+  "task": {
+    "id": "task10_2",
+    "instruction": "What\u2019s the last HbA1C (hemoglobin A1C) value in the chart for patient S1635224 and when was it recorded? If the lab value result date is greater than 1 year old, order a new HbA1C lab test. ",
+    "context": "It's 2023-11-13T10:15:00+00:00 now. The code for HbA1C is \"A1C\". The LOINC code for ordering HbA1C lab is: 4548-4. The answer should be [-1] if a measurement is not available.",
+    "sol": null,
+    "eval_MRN": "S1635224"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S1635224"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "MedicationRequest",
+          "id": "old-med",
+          "status": "active",
+          "intent": "order",
+          "subject": {
+            "reference": "Patient/S1635224"
+          },
+          "medicationCodeableConcept": {
+            "text": "aspirin"
+          }
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "a1c-recent",
+          "status": "final",
+          "code": {
+            "text": "A1C"
+          },
+          "effectiveDateTime": "2023-11-01T00:00:00+00:00",
+          "valueQuantity": {
+            "value": 6.4,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S1635224"
+          }
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S1635224",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "MedicationRequest",
+          "id": "old-med",
+          "status": "active",
+          "intent": "order",
+          "subject": {
+            "reference": "Patient/S1635224"
+          },
+          "medicationCodeableConcept": {
+            "text": "aspirin"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "a1c-recent",
+          "status": "final",
+          "code": {
+            "text": "A1C"
+          },
+          "effectiveDateTime": "2023-11-01T00:00:00+00:00",
+          "valueQuantity": {
+            "value": 6.4,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S1635224"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [],
+    "updated": [],
+    "deleted": []
+  }
+}

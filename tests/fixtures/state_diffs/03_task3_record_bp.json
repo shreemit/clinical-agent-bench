@@ -1,0 +1,109 @@
+{
+  "name": "task3_record_bp",
+  "task": {
+    "id": "task3_1",
+    "instruction": "I just measured the blood pressure for patient with MRN of S2380121, and it is \"118/77 mmHg\". Help me record it.",
+    "context": "It's 2023-11-13T10:15:00+00:00 now. The flowsheet ID for blood pressure is BP.",
+    "sol": null,
+    "eval_MRN": "S2380121"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S2380121"
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S2380121",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "status": "final",
+          "category": [
+            {
+              "coding": [
+                {
+                  "system": "http://hl7.org/fhir/observation-category",
+                  "code": "vital-signs",
+                  "display": "Vital Signs"
+                }
+              ]
+            }
+          ],
+          "code": {
+            "text": "BP"
+          },
+          "effectiveDateTime": "2023-11-13T10:15:00+00:00",
+          "valueString": "118/77 mmHg",
+          "subject": {
+            "reference": "Patient/S2380121"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules",
+          "id": "srv-1"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [
+      {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://hl7.org/fhir/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "text": "BP"
+        },
+        "effectiveDateTime": "2023-11-13T10:15:00+00:00",
+        "valueString": "118/77 mmHg",
+        "subject": {
+          "reference": "Patient/S2380121"
+        }
+      }
+    ],
+    "updated": [],
+    "deleted": []
+  }
+}

@@ -1,6 +1,6 @@
 # ClinicalAgentBench-Exec
 
-Execution harness for a clinical-agent benchmark. A scripted agent sends real FHIR `GET`, `POST`, and `PUT` calls to HAPI FHIR. There are no model API calls.
+Execution harness for a clinical-agent benchmark. A scripted agent sends real FHIR `GET`, `POST`, and `PUT` calls to HAPI FHIR. The smoke path does not call a model API. `runners.baseline` calls the OpenAI chat completions API when you run it.
 
 The tasks and the patient database come from [MedAgentBench](https://github.com/stanfordmlgroup/MedAgentBench) (MIT). See `NOTICE` and `vendor/medagentbench/LICENSE`.
 
@@ -12,7 +12,7 @@ The tasks and the patient database come from [MedAgentBench](https://github.com/
 - A deterministic mock agent with one script per MedAgentBench v2 task family (`task1`–`task10`).
 - `make smoke`: reset, run `task1_1` … `task10_1`, print a pass/fail table and the reset timings.
 
-The fault proxy, idempotency wrapper, state-diff grader, repair-loop grader, prefix runner, autonomy summary, and `DELETE` + `$expunge` reset are not yet implemented. They raise `NotImplementedError` and are not on the smoke path.
+The fault proxy, idempotency wrapper, repair-loop grader, prefix replay, autonomy summary, and `DELETE` + `$expunge` reset are not yet implemented. They raise `NotImplementedError` and are not on the smoke path. Chart grading and the model baseline are below.
 
 ## Prerequisites
 
@@ -41,7 +41,30 @@ make smoke    # uv run python -m smoke; 10 resets + 10 tasks
 
 Smoke task ids are listed in `tasks/smoke_ids.txt`. Override the FHIR base with `CAB_FHIR_BASE` (default `http://127.0.0.1:8080/fhir/`).
 
-A task passes when every FHIR call returns a 2xx status and the agent emits `FINISH`. `task1` rows also compare `FINISH` to the `sol` field in the vendored task file. Other families have no `sol` in that file, so their answers are not graded.
+A smoke task passes when every FHIR call returns a 2xx status and the agent emits `FINISH`. `task1` rows also compare `FINISH` to the `sol` field in the vendored task file. Other families have no `sol` in that file, so smoke does not grade their answers. The baseline grades the chart instead.
+
+## State-diff grading
+
+`grade_trial_state` compares one patient's chart before and after a trial. The trial passes when the resources created, updated, and deleted match the expected fields. Server `meta`, narrative `text`, `language`, and `implicitRules` are ignored. Numbers match within 0.1. The finish string is not part of the grade.
+
+Tasks 1, 2, 4, 6, and 7 expect no chart change. Task 3 records a blood-pressure Observation. Tasks 5 and 9 write orders only when the pre-trial lab is low. Task 8 writes one referral. Task 10 orders an HbA1c only when a result is on the chart and its date is older than one year; no measurement means no order. Medication and service payloads use FHIR R4 shapes: `route` is a CodeableConcept and `note` is a list.
+
+`tests/fixtures/state_diffs/` holds 14 golden before/after charts covering those task types. `collect_patient_state` reads Patient, Observation, MedicationRequest, and ServiceRequest from HAPI for a live trial. Searches send `Cache-Control: no-cache` and sort by `_lastUpdated`, because HAPI otherwise reuses a cached search from before the write. The baseline also re-reads each accepted write Location into the after-state.
+
+## Model baseline
+
+```bash
+uv run python -m runners.baseline --k 1 --output runs/baseline
+uv run python -m runners.baseline --k 5 --output runs/baseline-k5
+uv run python -m runners.baseline --k 5 --no-reset --output runs/baseline-keep
+uv run python -m analysis.agreement runs/baseline/results.jsonl
+```
+
+The command reads `OPENAI_API_KEY` from the environment and exits with an error if it is missing. It does not run as part of `make test`. `--model` defaults to `gpt-6-luna`. `--tasks` defaults to `tasks/baseline_100.txt`, ten tasks from each of the ten families. Each trial restores the H2 snapshot before the agent runs. `--no-reset` leaves those writes in place so a later trial's pre-chart contains the earlier orders.
+
+The first trial of each task writes `prefixes/<task_id>.json`: messages before the first `POST` or `PUT`, and that pending write. A task that never writes stores the full transcript and a null pending write.
+
+Every trial is graded from the chart diff. Place the authors' `refsol.py` at `vendor/medagentbench/refsol.py`, or pass `--refsol`. The file should define `task1` … `task10(case_data, results, fhir_api_base)`, or a single `eval` function. `results.history` items have `role` (`agent` or `user`) and `content`. `results.result` is the `FINISH` payload. An accepted write is an agent turn `POST <url>` plus JSON, followed by a user turn that contains `POST request accepted`. If the file is absent the run prints `refsol skipped: <path> is not present` and still records the state grade. If the reference grader raises, that trial's transcript grade is left unset and the row is omitted from the agreement table. The authors' checker expects a string `route` and an object `note`, so a chart-correct MedicationRequest or ServiceRequest can disagree with it or raise. A trial that never finishes does not count as a state pass. Completed trials are written to `results.jsonl` as they finish, including when a later reset fails. `analysis.agreement` prints the 2×2 table of transcript pass/fail against state pass/fail.
 
 ## Layout
 
@@ -52,7 +75,14 @@ vendor/medagentbench/       test_data_v2.json, funcs_v1.json, upstream LICENSE
 src/harness/exec_harness.py real GET/POST/PUT
 src/agent/mock_agent.py     scripted agent
 src/fhir/snapshot_reset.py  calls the restore script
+src/graders/state_diff_grader.py  chart diff and expected fields
+src/graders/state_collector.py    FHIR snapshot of one patient
+src/graders/refsol_grader.py      optional transcript grader
+src/runners/baseline.py     model baseline (k trials, prefixes, resets)
+src/analysis/agreement.py   transcript-versus-state table
 src/smoke.py                10-task command
+tasks/baseline_100.txt      100 task ids for the baseline
+tests/fixtures/state_diffs/ 14 golden charts
 tests/                      unit tests, plus tests/test_docker_integration.py
 ```
 
@@ -71,4 +101,4 @@ Each `TODO(decision)` in the source is an open choice:
 - `funcs_v1.json` is vendored with the tasks. The mock agent does not interpret it; each family has a hand-written script.
 - The harness always forwards writes. A clinician accept/reject check is not yet implemented.
 - Saved smoke logs keep full POST/PUT bodies and only a summary of GET search bundles.
-- Pass/fail does not run the Stanford reference solution or a chart diff.
+- Smoke pass/fail is HTTP success plus `sol` when the task file has one. The baseline grades the chart diff, and the transcript grader only when `refsol.py` is present.

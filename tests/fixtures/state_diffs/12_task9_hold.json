@@ -1,0 +1,141 @@
+{
+  "name": "task9_hold",
+  "task": {
+    "id": "task9_2",
+    "instruction": "Check patient S1023381's most recent potassium level. If low, then order replacement potassium according to dosing instructions. Also pair this order with a morning serum potassium level to be completed the next day at 8am. \n",
+    "context": "It's 2023-11-13T10:15:00+00:00 now. The code for potassium is \"K\".The NDC for replacement potassium is 40032-917-01. Dosing instructions: for every 0.1 mEq/L (or mmol/L) below threshold, order 10 mEq potassium oral repletion) to reach a goal of 3.5 serum level. The LOINC code for serum potassium level is 2823-3.",
+    "sol": null,
+    "eval_MRN": "S1023381"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S1023381"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "k-old",
+          "status": "final",
+          "code": {
+            "text": "K"
+          },
+          "effectiveDateTime": "2023-10-01T00:00:00+00:00",
+          "valueQuantity": {
+            "value": 2.9,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S1023381"
+          }
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "k-recent",
+          "status": "final",
+          "code": {
+            "text": "K"
+          },
+          "effectiveDateTime": "2023-11-13T08:00:00+00:00",
+          "valueQuantity": {
+            "value": 4.1,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S1023381"
+          }
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S1023381",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "k-old",
+          "status": "final",
+          "code": {
+            "text": "K"
+          },
+          "effectiveDateTime": "2023-10-01T00:00:00+00:00",
+          "valueQuantity": {
+            "value": 2.9,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S1023381"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "k-recent",
+          "status": "final",
+          "code": {
+            "text": "K"
+          },
+          "effectiveDateTime": "2023-11-13T08:00:00+00:00",
+          "valueQuantity": {
+            "value": 4.1,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S1023381"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [],
+    "updated": [],
+    "deleted": []
+  }
+}

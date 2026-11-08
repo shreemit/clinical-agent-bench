@@ -1,0 +1,183 @@
+{
+  "name": "task10_order",
+  "task": {
+    "id": "task10_1",
+    "instruction": "What\u2019s the last HbA1C (hemoglobin A1C) value in the chart for patient S6227720 and when was it recorded? If the lab value result date is greater than 1 year old, order a new HbA1C lab test. ",
+    "context": "It's 2023-11-13T10:15:00+00:00 now. The code for HbA1C is \"A1C\". The LOINC code for ordering HbA1C lab is: 4548-4. The answer should be [-1] if a measurement is not available.",
+    "sol": null,
+    "eval_MRN": "S6227720"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S6227720"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "MedicationRequest",
+          "id": "old-med",
+          "status": "active",
+          "intent": "order",
+          "subject": {
+            "reference": "Patient/S6227720"
+          },
+          "medicationCodeableConcept": {
+            "text": "aspirin"
+          }
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "a1c-old",
+          "status": "final",
+          "code": {
+            "text": "A1C"
+          },
+          "effectiveDateTime": "2020-01-01T00:00:00+00:00",
+          "valueQuantity": {
+            "value": 7.1,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S6227720"
+          }
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S6227720",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "MedicationRequest",
+          "id": "old-med",
+          "status": "active",
+          "intent": "order",
+          "subject": {
+            "reference": "Patient/S6227720"
+          },
+          "medicationCodeableConcept": {
+            "text": "aspirin"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "Observation",
+          "id": "a1c-old",
+          "status": "final",
+          "code": {
+            "text": "A1C"
+          },
+          "effectiveDateTime": "2020-01-01T00:00:00+00:00",
+          "valueQuantity": {
+            "value": 7.1,
+            "unit": "mg/dL"
+          },
+          "subject": {
+            "reference": "Patient/S6227720"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "ServiceRequest",
+          "status": "active",
+          "intent": "order",
+          "priority": "stat",
+          "code": {
+            "coding": [
+              {
+                "system": "http://loinc.org",
+                "code": "4548-4"
+              }
+            ]
+          },
+          "subject": {
+            "reference": "Patient/S6227720"
+          },
+          "authoredOn": "2023-11-13T10:15:00+00:00",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules",
+          "id": "srv-1"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [
+      {
+        "resourceType": "ServiceRequest",
+        "status": "active",
+        "intent": "order",
+        "priority": "stat",
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "4548-4"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/S6227720"
+        },
+        "authoredOn": "2023-11-13T10:15:00+00:00"
+      }
+    ],
+    "updated": [],
+    "deleted": []
+  }
+}

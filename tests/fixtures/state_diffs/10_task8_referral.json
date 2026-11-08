@@ -1,0 +1,109 @@
+{
+  "name": "task8_referral",
+  "task": {
+    "id": "task8_1",
+    "instruction": "Order orthopedic surgery referral for patient S2016972. Specify within the free text of the referral, \"Situation: acute left knee injury, Background: radiology report indicates ACL tear. Assessment: ACL tear grade II. Recommendation: request for Orthopedic service to evaluate and provide management recommendations.\"",
+    "context": "It's 2023-11-13T10:15:00+00:00 now. The SNOMED code for orthopedic surgery referral is 306181000000106.",
+    "sol": null,
+    "eval_MRN": "S2016972"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S2016972"
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S2016972",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "ServiceRequest",
+          "status": "active",
+          "intent": "order",
+          "priority": "stat",
+          "code": {
+            "coding": [
+              {
+                "system": "http://snomed.info/sct",
+                "code": "306181000000106"
+              }
+            ]
+          },
+          "subject": {
+            "reference": "Patient/S2016972"
+          },
+          "authoredOn": "2023-11-13T10:15:00+00:00",
+          "note": [
+            {
+              "text": "Situation: acute left knee injury, Background: radiology report indicates ACL tear. Assessment: ACL tear grade II. Recommendation: request for Orthopedic service to evaluate and provide management recommendations."
+            }
+          ],
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules",
+          "id": "srv-1"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [
+      {
+        "resourceType": "ServiceRequest",
+        "status": "active",
+        "intent": "order",
+        "priority": "stat",
+        "code": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "306181000000106"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/S2016972"
+        },
+        "authoredOn": "2023-11-13T10:15:00+00:00",
+        "note": [
+          {
+            "text": "Situation: acute left knee injury, Background: radiology report indicates ACL tear. Assessment: ACL tear grade II. Recommendation: request for Orthopedic service to evaluate and provide management recommendations."
+          }
+        ]
+      }
+    ],
+    "updated": [],
+    "deleted": []
+  }
+}

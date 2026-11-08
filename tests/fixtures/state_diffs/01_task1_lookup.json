@@ -1,0 +1,89 @@
+{
+  "name": "task1_lookup",
+  "task": {
+    "id": "task1_1",
+    "instruction": "What\u2019s the MRN of the patient with name Peter Stafford and DOB of 1932-12-29? If the patient does not exist, the answer should be \"Patient not found\"",
+    "context": "",
+    "sol": [
+      "S6534835"
+    ],
+    "eval_MRN": "S6534835"
+  },
+  "pre_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S6534835"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "MedicationRequest",
+          "id": "old-med",
+          "status": "active",
+          "intent": "order",
+          "subject": {
+            "reference": "Patient/S6534835"
+          },
+          "medicationCodeableConcept": {
+            "text": "aspirin"
+          }
+        }
+      }
+    ]
+  },
+  "post_bundle": {
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+      {
+        "resource": {
+          "resourceType": "Patient",
+          "id": "S6534835",
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      },
+      {
+        "resource": {
+          "resourceType": "MedicationRequest",
+          "id": "old-med",
+          "status": "active",
+          "intent": "order",
+          "subject": {
+            "reference": "Patient/S6534835"
+          },
+          "medicationCodeableConcept": {
+            "text": "aspirin"
+          },
+          "meta": {
+            "versionId": "9",
+            "lastUpdated": "2023-11-13T10:16:00+00:00"
+          },
+          "text": {
+            "status": "generated",
+            "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">ignored</div>"
+          },
+          "language": "en",
+          "implicitRules": "http://example.test/rules"
+        }
+      }
+    ]
+  },
+  "gold": {
+    "created": [],
+    "updated": [],
+    "deleted": []
+  }
+}
