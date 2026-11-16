@@ -12,7 +12,7 @@ The tasks and the patient database come from [MedAgentBench](https://github.com/
 - A deterministic mock agent with one script per MedAgentBench v2 task family (`task1`–`task10`).
 - `make smoke`: reset, run `task1_1` … `task10_1`, print a pass/fail table and the reset timings.
 
-The fault proxy, idempotency wrapper, repair-loop grader, prefix replay, autonomy summary, and `DELETE` + `$expunge` reset are not yet implemented. They raise `NotImplementedError` and are not on the smoke path. Chart grading and the model baseline are below.
+The idempotency wrapper, repair-loop grader, prefix replay, autonomy summary, and `DELETE` + `$expunge` reset are not yet implemented. They raise `NotImplementedError` and are not on the smoke path. Chart grading and the model baseline are below.
 
 ## Prerequisites
 
@@ -35,7 +35,7 @@ make test-docker
 make smoke    # uv run python -m smoke; 10 resets + 10 tasks
 ```
 
-`uv sync` installs the dev group (pytest). `uv sync --extra dev` installs that extra as well. `make test` runs `uv run pytest -m "not docker"`. `make smoke` runs `uv run python -m smoke`.
+`uv sync` installs the dev group (pytest). `uv sync --extra dev` installs that extra as well. `make test` runs `uv run pytest -m "not docker"`. `make smoke` runs `uv run python -m smoke`. Optional smoke flags are `--fault`, `--seed`, `--fault-attempt`, `--mitigation`, and `--fault-log`. The defaults (`none`, seed `0`, attempt `1`, mitigation `off`) forward every call unchanged.
 
 `make reset` restores the snapshot once and prints one timing line. `make snapshot` stops HAPI and replaces the clean snapshot with the current live file. Take that only from a database that has not been written since the last reset.
 
@@ -49,7 +49,29 @@ A smoke task passes when every FHIR call returns a 2xx status and the agent emit
 
 Tasks 1, 2, 4, 6, and 7 expect no chart change. Task 3 records a blood-pressure Observation. Tasks 5 and 9 write orders only when the pre-trial lab is low. Task 8 writes one referral. Task 10 orders an HbA1c only when a result is on the chart and its date is older than one year; no measurement means no order. Medication and service payloads use FHIR R4 shapes: `route` is a CodeableConcept and `note` is a list.
 
-`tests/fixtures/state_diffs/` holds 14 golden before/after charts covering those task types. `collect_patient_state` reads Patient, Observation, MedicationRequest, and ServiceRequest from HAPI for a live trial. Searches send `Cache-Control: no-cache` and sort by `_lastUpdated`, because HAPI otherwise reuses a cached search from before the write. The baseline also re-reads each accepted write Location into the after-state.
+`tests/fixtures/state_diffs/` holds 14 golden before/after charts covering those task types. `collect_patient_state` reads Patient, Observation, MedicationRequest, and ServiceRequest from HAPI for a live trial. Searches send `Cache-Control: no-cache` and sort by `_lastUpdated`, because HAPI otherwise reuses a cached search from before the write. The baseline also re-reads each accepted write Location into the after-state. Those reads go through the same proxy as the agent. A write that HAPI accepted and the proxy then hid (a committed timeout) is re-read from the Location the proxy recorded, so the chart diff still includes it.
+
+## Fault proxy
+
+`FaultProxy` sits in process in front of the FHIR HTTP client. Smoke and the baseline both use it. `--fault none` and `--mitigation off` leave the request and response unchanged.
+
+`--fault` injects one fault on a single `POST` or `PUT`. `--fault-attempt` selects that write (default `1`). `GET`s and every other write are forwarded. `--seed` fixes the only choice inside a fault: an even seed makes `transient_5xx` return 503, and an odd seed makes it return 500.
+
+- `committed_timeout` forwards the write, keeps HAPI's Location in the log, and returns 504 to the caller.
+- `uncommitted_timeout` does not forward and returns 504.
+- `transient_5xx` does not forward and returns 503 or 500.
+- `conflict_409`, `precondition_412`, and `unprocessable_422` do not forward. Each returns an OperationOutcome with `issue.severity`, `issue.code`, `issue.diagnostics`, and `issue.expression`.
+- `duplicate_retry` forwards the same write twice and returns the second response.
+- `none` forwards once.
+
+Every attempt is appended to JSONL (`runs/faults.jsonl` for smoke, `<output>/faults.jsonl` for the baseline): fault, attempt number, method, URL, status returned to the caller, and, when the write was forwarded, the upstream status and Location.
+
+`--mitigation preconditions` (default `off`) adds server-side headers. Each `POST` gets an identifier in system `urn:cab:write` whose value is the trial, task, resource type, and write index, plus `If-None-Exist` for that identifier. A later `POST` with the same body reuses the index, so HAPI can return the existing resource instead of creating another. Each `PUT` sends `If-Match` from the ETag of the last read of that resource. If this trial has not read it, the ETag from the last successful create or update is used. This HAPI build rejects a stale `If-Match` with 409 (`HAPI-0989`) and does not overwrite the resource. It does not return 412 for that conflict. The injected `precondition_412` fault is separate: the proxy returns 412 itself and does not call HAPI.
+
+```bash
+uv run python -m smoke --fault none --mitigation off
+uv run python -m runners.baseline --k 1 --fault committed_timeout --seed 0 --fault-attempt 1 --mitigation preconditions
+```
 
 ## Model baseline
 
@@ -57,10 +79,11 @@ Tasks 1, 2, 4, 6, and 7 expect no chart change. Task 3 records a blood-pressure 
 uv run python -m runners.baseline --k 1 --output runs/baseline
 uv run python -m runners.baseline --k 5 --output runs/baseline-k5
 uv run python -m runners.baseline --k 5 --no-reset --output runs/baseline-keep
+uv run python -m runners.baseline --k 1 --fault none --seed 0 --mitigation off --output runs/baseline
 uv run python -m analysis.agreement runs/baseline/results.jsonl
 ```
 
-The command reads `OPENAI_API_KEY` from the environment and exits with an error if it is missing. It does not run as part of `make test`. `--model` defaults to `gpt-6-luna`. `--tasks` defaults to `tasks/baseline_100.txt`, ten tasks from each of the ten families. Each trial restores the H2 snapshot before the agent runs. `--no-reset` leaves those writes in place so a later trial's pre-chart contains the earlier orders.
+The command reads `OPENAI_API_KEY` from the environment and exits with an error if it is missing. It does not run as part of `make test`. `--model` defaults to `gpt-6-luna`. `--tasks` defaults to `tasks/baseline_100.txt`, ten tasks from each of the ten families. Each trial restores the H2 snapshot before the agent runs. `--no-reset` leaves those writes in place so a later trial's pre-chart contains the earlier orders. `--fault`, `--seed`, `--fault-attempt`, and `--mitigation` are the same switches as smoke. Defaults leave each write unchanged. State-diff reads use the same proxy.
 
 The first trial of each task writes `prefixes/<task_id>.json`: messages before the first `POST` or `PUT`, and that pending write. A task that never writes stores the full transcript and a null pending write.
 
@@ -73,6 +96,7 @@ docker-compose.yml          HAPI service, bind-mounts ./docker/live at /data
 scripts/                    fetch, load, snapshot, restore
 vendor/medagentbench/       test_data_v2.json, funcs_v1.json, upstream LICENSE
 src/harness/exec_harness.py real GET/POST/PUT
+src/proxy/fault_proxy.py    in-process fault injection and precondition headers
 src/agent/mock_agent.py     scripted agent
 src/fhir/snapshot_reset.py  calls the restore script
 src/graders/state_diff_grader.py  chart diff and expected fields

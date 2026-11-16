@@ -17,6 +17,7 @@ from graders.state_diff_grader import gold_spec_for_task, grade_trial_state
 from harness.exec_harness import ExecHarness
 from harness.http_client import HttpClient, UrllibHttpClient
 from harness.types import AgentAction, TaskCase, ToolObservation
+from proxy.fault_proxy import FAULT_TYPES, MITIGATION_MODES, FaultProxy
 from tasks_io import load_task_file, repo_root
 
 DEFAULT_MODEL = "gpt-6-luna"
@@ -262,6 +263,11 @@ def run_baseline(
     refsol_path: Path,
     no_reset: bool = False,
     reset: Callable[[], object] | None = None,
+    fault: str = "none",
+    seed: int = 0,
+    fault_attempt: int = 1,
+    mitigation: str = "off",
+    fault_log: Path | None = None,
 ) -> list[dict]:
     """Run k trials per task, grade each chart, and write prefixes and results."""
 
@@ -276,7 +282,15 @@ def run_baseline(
         print(skip_message, file=sys.stderr)
     if no_reset:
         print("resets disabled: chart writes persist across trials")
-    harness = ExecHarness(fhir_api_base, http=http)
+    proxy = FaultProxy(
+        http,
+        fault=fault,
+        seed=seed,
+        on_attempt=fault_attempt,
+        mitigation=mitigation,
+        log_path=fault_log if fault_log is not None else output_dir / "faults.jsonl",
+    )
+    harness = ExecHarness(fhir_api_base, http=proxy)
     rows: list[dict] = []
     for task in tasks:
         patient_id = task.eval_mrn or parse_mrn(task.instruction)
@@ -288,15 +302,16 @@ def run_baseline(
                     restore_snapshot()
                 else:
                     reset()
-            pre = collect_patient_state(http, fhir_api_base, patient_id)
+            proxy.begin_trial(f"{task.id}:{trial}", task.id)
+            pre = collect_patient_state(proxy, fhir_api_base, patient_id)
             pre_ids = resource_ids(pre)
             if initial_ids is None:
                 initial_ids = pre_ids
             agent = PromptAgent(task, fhir_api_base, client, model)
             record = harness.run(task, agent)
             post = merge_resources(
-                collect_patient_state(http, fhir_api_base, patient_id),
-                read_locations(http, fhir_api_base, _write_locations(record)),
+                collect_patient_state(proxy, fhir_api_base, patient_id),
+                read_locations(proxy, fhir_api_base, _locations_for_grade(proxy, record)),
             )
             gold = gold_spec_for_task(task, pre)
             state = grade_trial_state(pre, post, gold, record.finish_text or "")
@@ -357,12 +372,24 @@ def run_baseline(
 
 
 def _write_locations(record) -> list[str]:
-    """Location URLs for writes HAPI accepted."""
+    """Location URLs for writes the caller saw accepted."""
 
     locations: list[str] = []
     for call in record.calls:
         if call.method in ("POST", "PUT") and call.location and 200 <= call.status < 300:
             locations.append(call.location)
+    return locations
+
+
+def _locations_for_grade(proxy: FaultProxy, record) -> list[str]:
+    """Caller-visible write Locations plus commits a timeout hid from the caller."""
+
+    locations = _write_locations(record)
+    seen = set(locations)
+    for location in proxy.committed_locations():
+        if location and location not in seen:
+            locations.append(location)
+            seen.add(location)
     return locations
 
 
@@ -416,9 +443,37 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("CAB_FHIR_BASE", "http://127.0.0.1:8080/fhir/"),
     )
     parser.add_argument("--reasoning-effort", default="none")
+    parser.add_argument(
+        "--fault",
+        default="none",
+        choices=FAULT_TYPES,
+        help="fault injected on one write attempt (default: none)",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="seed for deterministic faults")
+    parser.add_argument(
+        "--fault-attempt",
+        type=int,
+        default=1,
+        help="1-based POST/PUT attempt that receives the fault",
+    )
+    parser.add_argument(
+        "--mitigation",
+        default="off",
+        choices=MITIGATION_MODES,
+        help="server precondition headers (default: off)",
+    )
+    parser.add_argument(
+        "--fault-log",
+        type=Path,
+        default=None,
+        help="JSONL path for proxy attempts (default: <output>/faults.jsonl)",
+    )
     args = parser.parse_args(argv)
     if args.k < 1:
         print("k must be at least 1", file=sys.stderr)
+        return 2
+    if args.fault_attempt < 1:
+        print("fault-attempt must be at least 1", file=sys.stderr)
         return 2
     try:
         client = OpenAIChatClient(reasoning_effort=args.reasoning_effort or None)
@@ -442,6 +497,11 @@ def main(argv: list[str] | None = None) -> int:
         http=UrllibHttpClient(),
         refsol_path=args.refsol,
         no_reset=args.no_reset,
+        fault=args.fault,
+        seed=args.seed,
+        fault_attempt=args.fault_attempt,
+        mitigation=args.mitigation,
+        fault_log=args.fault_log,
     )
     print(format_agreement(agreement_counts(rows)))
     print(f"wrote {len(rows)} trial results to {args.output}")

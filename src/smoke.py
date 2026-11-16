@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,7 +11,9 @@ from agent.mock_agent import MockAgent
 from fhir.reset_timing import ResetReceipt
 from fhir.snapshot_reset import restore_snapshot
 from harness.exec_harness import ExecHarness
+from harness.http_client import UrllibHttpClient
 from harness.types import TrialRecord
+from proxy.fault_proxy import FAULT_TYPES, MITIGATION_MODES, FaultProxy
 from tasks_io import load_smoke_ids, load_task_file, repo_root
 
 FHIR_API_BASE = "http://127.0.0.1:8080/fhir/"
@@ -55,16 +59,36 @@ def summarize_resets(rows: list[SmokeRow]) -> str:
     )
 
 
-def run_smoke(fhir_api_base: str = FHIR_API_BASE, root: Path | None = None) -> tuple[list[SmokeRow], int]:
+def run_smoke(
+    fhir_api_base: str = FHIR_API_BASE,
+    root: Path | None = None,
+    *,
+    fault: str = "none",
+    seed: int = 0,
+    fault_attempt: int = 1,
+    mitigation: str = "off",
+    fault_log: Path | None = None,
+) -> tuple[list[SmokeRow], int]:
+    """Reset, run each smoke task through the fault proxy, and return rows plus failures."""
+
     root = root or repo_root()
     tasks = load_task_file()
     rows: list[SmokeRow] = []
-    harness = ExecHarness(fhir_api_base)
     runs = root / "runs"
     runs.mkdir(parents=True, exist_ok=True)
+    proxy = FaultProxy(
+        UrllibHttpClient(),
+        fault=fault,
+        seed=seed,
+        on_attempt=fault_attempt,
+        mitigation=mitigation,
+        log_path=fault_log if fault_log is not None else runs / "faults.jsonl",
+    )
+    harness = ExecHarness(fhir_api_base, http=proxy)
     smoke_log = runs / "smoke.jsonl"
     for task_id in load_smoke_ids():
         receipt = restore_snapshot(root)
+        proxy.begin_trial(task_id, task_id)
         task = tasks[task_id]
         record = harness.run(task, MockAgent(task, fhir_api_base))
         row = SmokeRow(
@@ -126,9 +150,26 @@ def _call_json(call) -> dict:
 
 
 # TODO(decision): smoke exits 0 when tasks pass even if reset exceeds 5 seconds.
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Reset HAPI and run the ten smoke tasks.")
+    parser.add_argument("--fault", default="none", choices=FAULT_TYPES)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--fault-attempt", type=int, default=1)
+    parser.add_argument("--mitigation", default="off", choices=MITIGATION_MODES)
+    parser.add_argument("--fault-log", type=Path, default=None)
+    args = parser.parse_args(argv)
+    if args.fault_attempt < 1:
+        print("fault-attempt must be at least 1", file=sys.stderr)
+        return 2
     base = os.environ.get("CAB_FHIR_BASE", FHIR_API_BASE)
-    rows, failures = run_smoke(fhir_api_base=base)
+    rows, failures = run_smoke(
+        fhir_api_base=base,
+        fault=args.fault,
+        seed=args.seed,
+        fault_attempt=args.fault_attempt,
+        mitigation=args.mitigation,
+        fault_log=args.fault_log,
+    )
     print(format_smoke_table(rows))
     print(summarize_resets(rows))
     for row in rows:
