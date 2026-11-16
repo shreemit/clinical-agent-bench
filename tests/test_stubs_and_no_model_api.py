@@ -7,7 +7,6 @@ from fhir.reset_controller import reset_patient_after_trial
 from graders.loop_evaluator import grade_loop
 from harness.clinician_gate import ClinicianGate
 from harness.idempotency import attach_idempotency
-from proxy.fault_proxy import proxy_post
 from runners.prefix_runner import run_from_prefix
 
 
@@ -16,8 +15,6 @@ def test_unimplemented_modules_raise():
         ClinicianGate().approve({})
     with pytest.raises(NotImplementedError):
         attach_idempotency({}, {}, "t", "task", "none")
-    with pytest.raises(NotImplementedError):
-        proxy_post("Observation", b"{}", {})
     with pytest.raises(NotImplementedError):
         grade_loop()
     with pytest.raises(NotImplementedError):
