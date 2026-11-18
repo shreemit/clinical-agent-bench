@@ -4,6 +4,7 @@ import copy
 import json
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin
@@ -39,6 +40,7 @@ class FaultProxy:
         log_path: Path | None = None,
         trial_id: str = "0",
         task_id: str = "",
+        run_id: str | None = None,
     ) -> None:
         """Wrap a FHIR client so one chosen write can fail in a fixed way."""
 
@@ -56,11 +58,16 @@ class FaultProxy:
         self.log_path = log_path
         self.trial_id = str(trial_id)
         self.task_id = str(task_id)
+        self.run_id = uuid.uuid4().hex if run_id is None else str(run_id)
         self._writes = 0
-        self._post_ids: dict[tuple[str, str, str], int] = {}
+        self._fault_fired = False
         self._type_seq: dict[str, int] = {}
         self._versions: dict[str, str] = {}
         self._committed: list[str] = []
+        self._retry_key: tuple[str, str, str] | None = None
+        self._retry_index: int | None = None
+        self._last_post_key: tuple[str, str, str] | None = None
+        self._last_post_index: int | None = None
 
     def begin_trial(self, trial_id: str, task_id: str) -> None:
         """Clear per-trial write counters, versions, and hidden commit locations."""
@@ -68,10 +75,20 @@ class FaultProxy:
         self.trial_id = str(trial_id)
         self.task_id = str(task_id)
         self._writes = 0
-        self._post_ids = {}
+        self._fault_fired = False
         self._type_seq = {}
         self._versions = {}
         self._committed = []
+        self._retry_key = None
+        self._retry_index = None
+        self._last_post_key = None
+        self._last_post_index = None
+
+    @property
+    def fault_fired(self) -> bool:
+        """True once the armed fault was applied to a write in this trial."""
+
+        return self._fault_fired
 
     def committed_locations(self) -> list[str]:
         """Locations HAPI accepted this trial, including writes hidden by a timeout."""
@@ -98,28 +115,29 @@ class FaultProxy:
         fault = "none"
         if attempt is not None and attempt == self.on_attempt and self.fault != "none":
             fault = self.fault
+            self._fault_fired = True
         if fault == "duplicate_retry":
             first = self._send(method, url, prepared_body, prepared_headers, timeout)
-            self._observe(method, url, first)
+            self._observe(method, url, first, remember_version=False)
             second = self._send(method, url, prepared_body, prepared_headers, timeout)
             self._observe(method, url, second)
             self._log(fault, attempt, 1, method, url, second.status, first)
             self._log(fault, attempt, 2, method, url, second.status, second)
-            return second
-        if fault == "committed_timeout":
+            result = second
+        elif fault == "committed_timeout":
             upstream = self._send(method, url, prepared_body, prepared_headers, timeout)
-            self._observe(method, url, upstream)
+            self._observe(method, url, upstream, remember_version=False)
             result = _synthetic(504, _outcome("error", "timeout", "Gateway timeout."), started)
             self._log(fault, attempt, 1, method, url, 504, upstream)
-            return result
-        if fault == "none":
-            upstream = self._send(method, url, prepared_body, prepared_headers, timeout)
-            self._observe(method, url, upstream)
-            self._log(fault, attempt, 1, method, url, upstream.status, upstream)
-            return upstream
-        status, outcome = _injected_fault(fault, self.seed, _resource_type(url, prepared_body))
-        result = _synthetic(status, outcome, started)
-        self._log(fault, attempt, 0, method, url, status, None)
+        elif fault == "none":
+            result = self._send(method, url, prepared_body, prepared_headers, timeout)
+            self._observe(method, url, result)
+            self._log(fault, attempt, 1, method, url, result.status, result)
+        else:
+            status, outcome = _injected_fault(fault, self.seed, _resource_type(url, prepared_body))
+            result = _synthetic(status, outcome, started)
+            self._log(fault, attempt, 0, method, url, status, None)
+        self._note_caller_outcome(method, result.status)
         return result
 
     def _prepare(
@@ -147,18 +165,35 @@ class FaultProxy:
         return body, prepared_headers
 
     def _with_post_identity(self, url: str, body: dict[str, Any] | None) -> dict[str, Any]:
-        """Add the idempotency identifier for this logical POST, reusing it on a retry."""
+        """Add this POST's idempotency identifier, reusing it only for a failed-write retry."""
 
         resource_type = _resource_type(url, body) or "Resource"
         canonical = _canonical_body(body)
         key = (resource_type, url.split("?", 1)[0].rstrip("/"), canonical)
-        index = self._post_ids.get(key)
-        if index is None:
+        if self._retry_key == key and self._retry_index is not None:
+            index = self._retry_index
+        else:
             index = self._type_seq.get(resource_type, 0) + 1
             self._type_seq[resource_type] = index
-            self._post_ids[key] = index
-        value = f"{self.trial_id}:{self.task_id}:{resource_type}:{index}"
+        self._last_post_key = key
+        self._last_post_index = index
+        value = f"{self.run_id}:{self.trial_id}:{self.task_id}:{resource_type}:{index}"
         return _with_identifier(body if isinstance(body, dict) else {}, value)
+
+    def _note_caller_outcome(self, method: str, status: int) -> None:
+        """Arm identifier reuse only when the caller saw a failed POST and retries it next."""
+
+        if method == "POST" and self._last_post_key is not None and self._last_post_index is not None:
+            if 200 <= status < 300:
+                self._retry_key = None
+                self._retry_index = None
+            else:
+                self._retry_key = self._last_post_key
+                self._retry_index = self._last_post_index
+            return
+        if method in _WRITE_METHODS:
+            self._retry_key = None
+            self._retry_index = None
 
     def _send(
         self,
@@ -173,8 +208,8 @@ class FaultProxy:
         payload = copy.deepcopy(body) if isinstance(body, dict) else body
         return self.inner.request(method, url, body=payload, headers=dict(headers), timeout=timeout)
 
-    def _observe(self, method: str, url: str, result: HttpResult) -> None:
-        """Remember a successful version and any Location HAPI accepted."""
+    def _observe(self, method: str, url: str, result: HttpResult, *, remember_version: bool = True) -> None:
+        """Remember a Location HAPI accepted, and a version only when the caller saw it."""
 
         if 200 <= result.status < 300:
             location = _header(result.headers, "Location")
@@ -182,6 +217,8 @@ class FaultProxy:
                 raw = _absolute(location, url).split("?", 1)[0]
                 if raw not in self._committed:
                     self._committed.append(raw)
+        if not remember_version:
+            return
         token = _version_token(result)
         if token is None or result.status < 200 or result.status >= 300:
             return
@@ -217,6 +254,7 @@ class FaultProxy:
         if self.log_path is None:
             return
         record = {
+            "run_id": self.run_id,
             "trial_id": self.trial_id,
             "task_id": self.task_id,
             "fault": fault,
