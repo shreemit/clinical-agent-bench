@@ -3,8 +3,15 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
+import math
 import os
+import re
 import sys
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -20,8 +27,38 @@ from harness.types import AgentAction, TaskCase, ToolObservation
 from proxy.fault_proxy import FAULT_TYPES, MITIGATION_MODES, FaultProxy
 from tasks_io import load_task_file, repo_root
 
+logger = logging.getLogger(__name__)
+
+PROVIDERS = ("openai", "groq")
 DEFAULT_MODEL = "gpt-6-luna"
-API_URL = "https://api.openai.com/v1/chat/completions"
+GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+API_URL = OPENAI_API_URL
+GROQ_RATE_LIMIT_RETRIES = 3
+GROQ_RATE_LIMIT_WAIT_CAP_S = 30.0
+GROQ_RATE_LIMIT_DEFAULT_WAIT_S = 1.0
+DEFAULT_MAX_COMPLETION_TOKENS = 4096
+_ACTION_KINDS = ("GET", "POST", "PUT", "FINISH")
+_DISTRIBUTION = "clinical-agent-bench-exec"
+_USER_AGENT_VERSION_FALLBACK = "0.1.0"
+
+_PROVIDER_CONFIG = {
+    "openai": {
+        "url": OPENAI_API_URL,
+        "env": "OPENAI_API_KEY",
+        "model": DEFAULT_MODEL,
+        "reasoning_effort": True,
+        "rate_limit_retries": 0,
+    },
+    "groq": {
+        "url": GROQ_API_URL,
+        "env": "GROQ_API_KEY",
+        "model": GROQ_DEFAULT_MODEL,
+        "reasoning_effort": False,
+        "rate_limit_retries": GROQ_RATE_LIMIT_RETRIES,
+    },
+}
 
 
 class MissingApiKeyError(RuntimeError):
@@ -32,15 +69,39 @@ class ChatClient(Protocol):
     def complete(self, messages: list[dict], model: str) -> str: ...
 
 
-def require_api_key() -> str:
-    """Return OPENAI_API_KEY or raise MissingApiKeyError."""
+def require_api_key(env_var: str = "OPENAI_API_KEY") -> str:
+    """Return the named API key or raise MissingApiKeyError."""
 
-    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    if not key:
+    return _api_key_or_raise(os.environ.get(env_var) or "", env_var)
+
+
+def _api_key_or_raise(key: str, env_var: str) -> str:
+    """Return a single-line key, or raise without including the key."""
+
+    if "\r" in key or "\n" in key:
         raise MissingApiKeyError(
-            "OPENAI_API_KEY is not set. Export it before running the baseline."
+            f"{env_var} contains a carriage return or line feed. Export a single-line key."
         )
-    return key
+    stripped = key.strip()
+    if not stripped:
+        raise MissingApiKeyError(f"{env_var} is not set. Export it before running the baseline.")
+    return stripped
+
+
+def default_model(provider: str) -> str:
+    """Model used when --model is omitted."""
+
+    return _provider_config(provider)["model"]
+
+
+def chat_user_agent() -> str:
+    """User-Agent sent on every chat completion request."""
+
+    try:
+        package_version = version(_DISTRIBUTION)
+    except PackageNotFoundError:
+        package_version = _USER_AGENT_VERSION_FALLBACK
+    return f"clinical-agent-bench/{package_version}"
 
 
 class OpenAIChatClient:
@@ -49,46 +110,344 @@ class OpenAIChatClient:
         api_key: str | None = None,
         http: HttpClient | None = None,
         reasoning_effort: str | None = "none",
+        provider: str = "openai",
+        sleep: Callable[[float], None] | None = None,
+        max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
     ) -> None:
+        config = _provider_config(provider)
+        env_var = config["env"]
         if api_key is None:
-            self.api_key = require_api_key()
+            self.api_key = require_api_key(env_var)
         else:
-            self.api_key = api_key.strip()
-            if not self.api_key:
-                raise MissingApiKeyError(
-                    "OPENAI_API_KEY is not set. Export it before running the baseline."
-                )
+            self.api_key = _api_key_or_raise(api_key, env_var)
+        if max_completion_tokens < 1:
+            raise ValueError("max_completion_tokens must be at least 1")
+        self.provider = provider
+        self.api_url = config["url"]
+        self.send_reasoning_effort = bool(config["reasoning_effort"])
+        self.rate_limit_retries = int(config["rate_limit_retries"])
+        self.max_completion_tokens = max_completion_tokens if provider == "groq" else None
         self.http = http if http is not None else UrllibHttpClient()
         self.reasoning_effort = reasoning_effort
+        self._sleep = time.sleep if sleep is None else sleep
 
     def complete(self, messages: list[dict], model: str) -> str:
         """Send one chat completion and return the assistant text."""
 
-        body: dict[str, Any] = {"model": model, "messages": messages}
-        if self.reasoning_effort:
-            body["reasoning_effort"] = self.reasoning_effort
-        if self.reasoning_effort in (None, "none"):
-            body["temperature"] = 0
-        result = self.http.request(
-            "POST",
-            API_URL,
-            body=body,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+        body = _completion_body(
+            messages,
+            model,
+            self.reasoning_effort,
+            self.send_reasoning_effort,
+            self.max_completion_tokens,
         )
-        if result.status != 200 or not isinstance(result.body, dict):
-            raise RuntimeError(
-                f"chat completion failed with status {result.status}: {result.body}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": chat_user_agent(),
+        }
+        attempt = 0
+        while True:
+            result = self.http.request("POST", self.api_url, body=body, headers=headers)
+            if attempt >= self.rate_limit_retries or not _retryable_limit(result):
+                break
+            attempt += 1
+            wait = _retry_after_seconds(result.headers)
+            logger.warning(
+                "Groq rate limit (HTTP %s); retrying in %.2fs (%s/%s)",
+                result.status,
+                wait,
+                attempt,
+                self.rate_limit_retries,
             )
+            self._sleep(wait)
+        return _completion_text(result)
+
+
+def _provider_config(provider: str) -> dict[str, Any]:
+    """Endpoint, key variable, and request options for one provider."""
+
+    try:
+        return _PROVIDER_CONFIG[provider]
+    except KeyError as error:
+        raise ValueError(f"unknown provider {provider}") from error
+
+
+def _completion_body(
+    messages: list[dict],
+    model: str,
+    reasoning_effort: str | None,
+    send_reasoning_effort: bool,
+    max_completion_tokens: int | None,
+) -> dict[str, Any]:
+    """JSON body for one chat completion."""
+
+    body: dict[str, Any] = {"model": model, "messages": messages}
+    if send_reasoning_effort and reasoning_effort:
+        body["reasoning_effort"] = reasoning_effort
+    if not send_reasoning_effort or reasoning_effort in (None, "none"):
+        body["temperature"] = 0
+    if max_completion_tokens is not None:
+        body["max_completion_tokens"] = max_completion_tokens
+    return body
+
+
+def _retryable_limit(result: Any) -> bool:
+    """True for a Groq 429, or a 413 whose request still fits the token limit."""
+
+    if result.status == 429:
+        return True
+    return result.status == 413 and _temporary_token_overflow(result.body)
+
+
+def _temporary_token_overflow(body: Any) -> bool:
+    """True when a 413 asks for no more tokens than the stated limit."""
+
+    error = _error_object(body)
+    if error is None or error.get("code") != "rate_limit_exceeded":
+        return False
+    requested, limit = _token_counts(str(error.get("message") or ""))
+    if requested is None or limit is None:
+        return False
+    return requested <= limit
+
+
+def _token_counts(message: str) -> tuple[int | None, int | None]:
+    """Requested and limit token counts named in a rate-limit message."""
+
+    requested = re.search(r"Requested\s+(\d+)", message, re.IGNORECASE)
+    limit = re.search(r"Limit\s+(\d+)", message, re.IGNORECASE)
+    return (
+        int(requested.group(1)) if requested else None,
+        int(limit.group(1)) if limit else None,
+    )
+
+
+def _completion_text(result: Any) -> str:
+    """Assistant text, a recovered action, or an error for a bad response."""
+
+    if result.status == 0:
+        raise RuntimeError(_transport_error(result.body))
+    if result.status == 400 and _is_tool_use_failed(result.body):
+        recovered = _recover_tool_action(result.body)
+        if recovered is not None:
+            logger.warning("recovered chat action from HTTP 400 tool_use_failed")
+            return recovered
+        raise RuntimeError("chat completion failed with HTTP 400: tool_use_failed")
+    if result.status == 413:
+        raise RuntimeError(_too_large_message(result.body))
+    if result.status != 200 or not isinstance(result.body, dict):
+        raise RuntimeError(f"chat completion failed with HTTP {result.status}: {result.body}")
+    return _message_content(result.body)
+
+
+def _transport_error(body: Any) -> str:
+    """Wording for an HTTP client status of 0."""
+
+    if isinstance(body, dict) and "error" in body:
+        return f"transport error: {body['error']}"
+    return f"transport error: {body}"
+
+
+def _too_large_message(body: Any) -> str:
+    """HTTP 413 wording, naming counts when the request cannot fit."""
+
+    error = _error_object(body)
+    message = str(error.get("message") or "") if error else ""
+    requested, limit = _token_counts(message)
+    if requested is not None and limit is not None and requested > limit:
+        return (
+            f"chat completion failed with HTTP 413: requested {requested} tokens "
+            f"exceeds limit {limit}"
+        )
+    if error and error.get("code") == "rate_limit_exceeded":
+        return f"chat completion failed with HTTP 413: rate_limit_exceeded: {message}"
+    return f"chat completion failed with HTTP 413: {body}"
+
+
+def _error_object(body: Any) -> dict | None:
+    """Provider error object, when the body has one."""
+
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return None
+    return error
+
+
+def _message_content(body: dict) -> str:
+    """Return message content when the completion finished cleanly."""
+
+    try:
+        choice = body["choices"][0]
+        message = choice["message"]
+        content = message["content"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise RuntimeError(f"chat completion response has no message: {body}") from error
+    finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+    if finish_reason not in (None, "stop"):
+        raise RuntimeError(_early_stop_message(finish_reason, body))
+    if content is None or (isinstance(content, str) and not content.strip()):
+        shown = "missing" if finish_reason is None else finish_reason
+        raise RuntimeError(f"chat completion content is empty (finish_reason={shown})")
+    if not isinstance(content, str):
+        raise RuntimeError(f"chat completion content is not text: {content!r}")
+    return content
+
+
+def _early_stop_message(finish_reason: Any, body: dict) -> str:
+    """Error for a completion that did not finish with stop."""
+
+    tokens = _reasoning_tokens(body)
+    if tokens is None:
+        return f"chat completion stopped early (finish_reason={finish_reason})"
+    return (
+        f"chat completion stopped early (finish_reason={finish_reason}, "
+        f"reasoning_tokens={tokens})"
+    )
+
+
+def _reasoning_tokens(body: dict) -> int | None:
+    """Reasoning token count from a completion usage object."""
+
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    direct = usage.get("reasoning_tokens")
+    if isinstance(direct, int):
+        return direct
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, dict) and isinstance(details.get("reasoning_tokens"), int):
+        return details["reasoning_tokens"]
+    return None
+
+
+def _is_tool_use_failed(body: Any) -> bool:
+    """True when the provider rejected a tool call the client did not ask for."""
+
+    error = _error_object(body)
+    return error is not None and error.get("code") == "tool_use_failed"
+
+
+def _recover_tool_action(body: Any) -> str | None:
+    """Action text recovered from tool_use_failed, or None."""
+
+    error = _error_object(body)
+    if error is None:
+        return None
+    text = _action_text(error.get("failed_generation"))
+    if text is None:
+        return None
+    try:
+        parse_model_action(text)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return text
+
+
+def _action_text(raw: Any) -> str | None:
+    """Turn failed_generation into one GET, POST, PUT, or FINISH action."""
+
+    if isinstance(raw, str):
+        text = raw.strip()
+        if _leading_action(text):
+            return text
         try:
-            content = result.body["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as error:
-            raise RuntimeError(f"chat completion response has no message: {result.body}") from error
-        if not isinstance(content, str):
-            raise RuntimeError(f"chat completion content is not text: {content!r}")
-        return content
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return _action_text(parsed)
+    if isinstance(raw, dict):
+        if "arguments" in raw:
+            return _action_from_arguments(raw.get("arguments"))
+        return _action_from_arguments(raw)
+    return None
+
+
+def _leading_action(text: str) -> bool:
+    """True when the first token is an action verb."""
+
+    if not text:
+        return False
+    head = text.splitlines()[0].strip().split(" ", 1)[0].upper()
+    return head in _ACTION_KINDS
+
+
+def _action_from_arguments(arguments: Any) -> str | None:
+    """Build an action from tool arguments."""
+
+    if isinstance(arguments, str):
+        text = arguments.strip()
+        return text if _leading_action(text) else None
+    if not isinstance(arguments, dict):
+        return None
+    action = str(arguments.get("action") or "").strip().upper()
+    if action not in _ACTION_KINDS:
+        return None
+    if action == "FINISH":
+        payload = _argument_payload(arguments)
+        if payload is None:
+            return "FINISH"
+        rendered = payload if isinstance(payload, str) else json.dumps(payload)
+        return f"FINISH\n{rendered}"
+    url = arguments.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return None
+    line = f"{action} {url.strip()}"
+    if action == "GET":
+        return line
+    payload = _argument_payload(arguments)
+    if payload is None:
+        return None
+    rendered = payload if isinstance(payload, str) else json.dumps(payload)
+    return f"{line}\n{rendered}"
+
+
+def _argument_payload(arguments: dict) -> Any:
+    """Body or payload field from tool arguments."""
+
+    if "body" in arguments:
+        return arguments["body"]
+    if "payload" in arguments:
+        return arguments["payload"]
+    return None
+
+
+def _retry_after_seconds(headers: dict[str, str] | None) -> float:
+    """Seconds to wait after a rate limit, capped so one wait cannot stall a trial."""
+
+    raw = ""
+    for key, value in (headers or {}).items():
+        if key.lower() == "retry-after":
+            raw = str(value).strip()
+            break
+    wait = _parse_retry_after(raw)
+    if not math.isfinite(wait) or wait < 0:
+        return GROQ_RATE_LIMIT_DEFAULT_WAIT_S
+    if wait > GROQ_RATE_LIMIT_WAIT_CAP_S:
+        return GROQ_RATE_LIMIT_WAIT_CAP_S
+    return wait
+
+
+def _parse_retry_after(raw: str) -> float:
+    """Retry-After as seconds, or the default when the header is missing."""
+
+    if not raw:
+        return GROQ_RATE_LIMIT_DEFAULT_WAIT_S
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return GROQ_RATE_LIMIT_DEFAULT_WAIT_S
+    if parsed is None:
+        return GROQ_RATE_LIMIT_DEFAULT_WAIT_S
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (parsed - datetime.now(timezone.utc)).total_seconds()
 
 
 def load_task_ids(path: Path) -> list[str]:
@@ -136,7 +495,7 @@ def user_prompt(task: TaskCase) -> str:
 
 
 def parse_model_action(text: str) -> AgentAction:
-    """Parse a GET, POST, PUT, or FINISH reply."""
+    """Parse one GET, POST, PUT, or FINISH reply, ignoring a trailing action."""
 
     cleaned = _strip_fences(text).strip()
     if not cleaned:
@@ -158,7 +517,7 @@ def parse_model_action(text: str) -> AgentAction:
         raw = "\n".join(lines[1:]).strip()
         if not raw:
             raise ValueError(f"{kind} is missing a JSON body")
-        body = json.loads(raw)
+        body, _end = json.JSONDecoder().raw_decode(raw)
         if not isinstance(body, dict):
             raise ValueError(f"{kind} body must be a JSON object")
     return AgentAction(kind=kind, url=url, body=body)
@@ -268,6 +627,7 @@ def run_baseline(
     fault_attempt: int = 1,
     mitigation: str = "off",
     fault_log: Path | None = None,
+    provider: str = "openai",
 ) -> list[dict]:
     """Run k trials per task, grade each chart, and write prefixes and results."""
 
@@ -346,6 +706,7 @@ def run_baseline(
             row = {
                     "task_id": task.id,
                     "trial": trial,
+                    "provider": provider,
                     "model": model,
                     "fault": fault,
                     "seed": seed,
@@ -430,7 +791,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--k", type=int, default=1, help="trials per task (use 1 or 5)")
     parser.add_argument("--output", type=Path, default=repo_root() / "runs" / "baseline")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--provider",
+        choices=PROVIDERS,
+        default="openai",
+        help="chat completions provider (default: openai)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="model id (default: gpt-6-luna for openai, openai/gpt-oss-20b for groq)",
+    )
     parser.add_argument("--tasks", type=Path, default=repo_root() / "tasks" / "baseline_100.txt")
     parser.add_argument(
         "--refsol",
@@ -447,6 +818,12 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("CAB_FHIR_BASE", "http://127.0.0.1:8080/fhir/"),
     )
     parser.add_argument("--reasoning-effort", default="none")
+    parser.add_argument(
+        "--max-completion-tokens",
+        type=int,
+        default=DEFAULT_MAX_COMPLETION_TOKENS,
+        help="Groq max_completion_tokens (default: 4096)",
+    )
     parser.add_argument(
         "--fault",
         default="none",
@@ -479,8 +856,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.fault_attempt < 1:
         print("fault-attempt must be at least 1", file=sys.stderr)
         return 2
+    if args.max_completion_tokens < 1:
+        print("max-completion-tokens must be at least 1", file=sys.stderr)
+        return 2
+    model = args.model or default_model(args.provider)
     try:
-        client = OpenAIChatClient(reasoning_effort=args.reasoning_effort or None)
+        client = OpenAIChatClient(
+            reasoning_effort=args.reasoning_effort or None,
+            provider=args.provider,
+            max_completion_tokens=args.max_completion_tokens,
+        )
     except MissingApiKeyError as error:
         print(str(error), file=sys.stderr)
         return 2
@@ -495,7 +880,8 @@ def main(argv: list[str] | None = None) -> int:
         selected,
         k=args.k,
         output_dir=args.output,
-        model=args.model,
+        model=model,
+        provider=args.provider,
         client=client,
         fhir_api_base=args.fhir_base,
         http=UrllibHttpClient(),

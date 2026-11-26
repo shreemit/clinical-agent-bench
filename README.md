@@ -1,6 +1,6 @@
 # ClinicalAgentBench-Exec
 
-Execution harness for a clinical-agent benchmark. A scripted agent sends real FHIR `GET`, `POST`, and `PUT` calls to HAPI FHIR. The smoke path does not call a model API. `runners.baseline` calls the OpenAI chat completions API when you run it.
+Execution harness for a clinical-agent benchmark. A scripted agent sends real FHIR `GET`, `POST`, and `PUT` calls to HAPI FHIR. The smoke path does not call a model API. `runners.baseline` calls an OpenAI-compatible chat completions endpoint (OpenAI or Groq) when you run it.
 
 The tasks and the patient database come from [MedAgentBench](https://github.com/stanfordmlgroup/MedAgentBench) (MIT). See `NOTICE` and `vendor/medagentbench/LICENSE`.
 
@@ -80,10 +80,18 @@ uv run python -m runners.baseline --k 1 --output runs/baseline
 uv run python -m runners.baseline --k 5 --output runs/baseline-k5
 uv run python -m runners.baseline --k 5 --no-reset --output runs/baseline-keep
 uv run python -m runners.baseline --k 1 --fault none --seed 0 --mitigation off --output runs/baseline
+uv run python -m runners.baseline --provider groq --max-completion-tokens 4096 --k 1 --output runs/baseline-groq
+uv run python -m runners.baseline --provider groq --model openai/gpt-oss-120b --k 1 --output runs/baseline-groq-120b
 uv run python -m analysis.agreement runs/baseline/results.jsonl
 ```
 
-The command reads `OPENAI_API_KEY` from the environment and exits with an error if it is missing. It does not run as part of `make test`. `--model` defaults to `gpt-6-luna`. `--tasks` defaults to `tasks/baseline_100.txt`, ten tasks from each of the ten families. Each trial restores the H2 snapshot before the agent runs. `--no-reset` leaves those writes in place so a later trial's pre-chart contains the earlier orders. `--fault`, `--seed`, `--fault-attempt`, and `--mitigation` are the same switches as smoke. Defaults leave each write unchanged. State-diff reads bypass the proxy so grader reads do not affect cached ETags or `faults.jsonl`. Each `results.jsonl` row records `fault`, `seed`, `mitigation`, and `fault_fired`. `fault_fired` is false when the task never made the armed write, so those trials can be left out of a per-fault pass rate.
+`--provider` is `openai` (default) or `groq`. OpenAI reads `OPENAI_API_KEY` and posts to `https://api.openai.com/v1/chat/completions`. Its `--model` default is `gpt-6-luna`, and `--reasoning-effort` defaults to `none` (sent together with `temperature` 0). Groq reads `GROQ_API_KEY` and posts to `https://api.groq.com/openai/v1/chat/completions`. Its `--model` default is `openai/gpt-oss-20b`; pass `--model openai/gpt-oss-120b` for the larger model. Groq requests send `temperature` 0 and `max_completion_tokens` (default 4096, `--max-completion-tokens`) and do not send `reasoning_effort`, so gpt-oss uses its medium reasoning effort. Every provider sends `User-Agent: clinical-agent-bench/<installed version>`. A key that contains a carriage return or line feed is rejected and the error does not include the key. If the selected provider's key is missing, the command names that variable and exits. It does not run as part of `make test`.
+
+A chat reply is executed only when `finish_reason` is absent or `stop` and `content` is non-empty text. Any other `finish_reason`, including `length`, raises an error that names `finish_reason` and `reasoning_tokens` when that count is present. Partial `content` is not executed, and `message.reasoning` is never used as the action. Null or empty `content` is an error that names `finish_reason`. An HTTP 400 `tool_use_failed` is recovered when `failed_generation` is a GET, POST, PUT, or FINISH line, or JSON whose `arguments` are that line or an object with `action`, `url`, and `body` or `payload`. Recovery is logged. If it fails, the error is `HTTP 400: tool_use_failed`. A client status of 0 is reported as `transport error: ...`.
+
+Groq retries HTTP 429, and HTTP 413 `rate_limit_exceeded` when the message's requested tokens are less than or equal to its stated limit, up to 3 times. A 413 whose request is larger than that limit fails immediately. The wait is `Retry-After` when it is a finite number of seconds `>= 0`, or an HTTP date. A missing, non-finite, or negative value waits 1 second. The wait is capped at 30 seconds. Each retry is logged. The chat client uses its own HTTP client, separate from the FHIR client, so this retry does not go through `FaultProxy`. The proxy still wraps only FHIR calls.
+
+`--tasks` defaults to `tasks/baseline_100.txt`, ten tasks from each of the ten families. Each trial restores the H2 snapshot before the agent runs. `--no-reset` leaves those writes in place so a later trial's pre-chart contains the earlier orders. `--fault`, `--seed`, `--fault-attempt`, and `--mitigation` are the same switches as smoke. Defaults leave each write unchanged. State-diff reads bypass the proxy so grader reads do not affect cached ETags or `faults.jsonl`. Each `results.jsonl` row records `provider`, `model`, `fault`, `seed`, `mitigation`, and `fault_fired`. `fault_fired` is false when the task never made the armed write, so those trials can be left out of a per-fault pass rate.
 
 The first trial of each task writes `prefixes/<task_id>.json`: messages before the first `POST` or `PUT`, and that pending write. A task that never writes stores the full transcript and a null pending write.
 
