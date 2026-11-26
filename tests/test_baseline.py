@@ -1,4 +1,7 @@
 import json
+import logging
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
 
 import pytest
@@ -6,10 +9,15 @@ import pytest
 from agent.fhir_rules import first_quoted, require_snomed
 from agent.payloads import blood_pressure_observation, service_request
 from analysis.agreement import agreement_counts, format_agreement, load_results, main as agreement_main
-from harness.http_client import HttpResult
+from harness.http_client import HttpResult, UrllibHttpClient
 from harness.types import TaskCase
+from proxy.fault_proxy import FaultProxy
 from runners.baseline import (
     DEFAULT_MODEL,
+    GROQ_API_URL,
+    GROQ_DEFAULT_MODEL,
+    GROQ_RATE_LIMIT_RETRIES,
+    GROQ_RATE_LIMIT_WAIT_CAP_S,
     MissingApiKeyError,
     OpenAIChatClient,
     load_task_ids,
@@ -194,6 +202,229 @@ def test_chat_client_posts_the_configured_model():
     assert seen["headers"]["Authorization"] == "Bearer test-key"
 
 
+def test_groq_chat_client_omits_reasoning_effort():
+    seen = {}
+
+    class FakeHttp:
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            seen["method"] = method
+            seen["url"] = url
+            seen["body"] = body
+            seen["headers"] = headers
+            return HttpResult(
+                200,
+                {"choices": [{"message": {"content": "FINISH\n[]"}}]},
+                {},
+                1,
+            )
+
+    client = OpenAIChatClient(
+        api_key="groq-key",
+        http=FakeHttp(),
+        provider="groq",
+        reasoning_effort="high",
+    )
+    text = client.complete([{"role": "user", "content": "hi"}], model=GROQ_DEFAULT_MODEL)
+    assert text == "FINISH\n[]"
+    assert seen["method"] == "POST"
+    assert seen["url"] == GROQ_API_URL
+    assert seen["body"]["model"] == "openai/gpt-oss-20b"
+    assert seen["body"]["temperature"] == 0
+    assert "reasoning_effort" not in seen["body"]
+    assert seen["headers"]["Authorization"] == "Bearer groq-key"
+    assert seen["headers"]["Content-Type"] == "application/json"
+
+
+def test_groq_missing_api_key_fails_before_any_request(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "present-but-unused")
+
+    class Boom:
+        def request(self, *args, **kwargs):
+            raise AssertionError("HTTP was called without a key")
+
+    with pytest.raises(MissingApiKeyError, match="GROQ_API_KEY"):
+        OpenAIChatClient(provider="groq", http=Boom())
+    with pytest.raises(MissingApiKeyError, match="GROQ_API_KEY"):
+        OpenAIChatClient(provider="groq", api_key="  ", http=Boom())
+    from runners.baseline import main
+
+    code = main(["--provider", "groq", "--k", "1", "--output", str(tmp_path / "out")])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "GROQ_API_KEY" in err
+    assert "OPENAI_API_KEY" not in err
+    assert not (tmp_path / "out").exists()
+
+
+def test_groq_retries_429_using_retry_after(caplog):
+    calls = []
+    sleeps = []
+
+    class FakeHttp:
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            calls.append({"method": method, "url": url, "body": body, "headers": headers})
+            if len(calls) == 1:
+                return HttpResult(429, {"error": "rate_limit"}, {"Retry-After": "2"}, 1)
+            return HttpResult(
+                200,
+                {"choices": [{"message": {"content": "FINISH\n[]"}}]},
+                {},
+                1,
+            )
+
+    client = OpenAIChatClient(
+        api_key="groq-key",
+        http=FakeHttp(),
+        provider="groq",
+        sleep=sleeps.append,
+    )
+    with caplog.at_level(logging.WARNING):
+        text = client.complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+    assert text == "FINISH\n[]"
+    assert len(calls) == 2
+    assert calls[0]["url"] == GROQ_API_URL
+    assert calls[1]["url"] == GROQ_API_URL
+    assert "reasoning_effort" not in calls[0]["body"]
+    assert calls[0]["body"]["temperature"] == 0
+    assert sleeps == [2.0]
+    assert "429" in caplog.text
+    assert "retrying" in caplog.text
+
+
+def test_groq_caps_retry_after_and_stops_when_still_limited():
+    sleeps = []
+    calls = {"n": 0}
+
+    class FakeHttp:
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            del method, url, body, headers, timeout
+            calls["n"] += 1
+            if calls["n"] == 1:
+                later = datetime.now(timezone.utc) + timedelta(seconds=90)
+                return HttpResult(429, {"error": "rate_limit"}, {"Retry-After": format_datetime(later)}, 1)
+            return HttpResult(429, {"error": "rate_limit"}, {}, 1)
+
+    client = OpenAIChatClient(
+        api_key="groq-key",
+        http=FakeHttp(),
+        provider="groq",
+        sleep=sleeps.append,
+    )
+    with pytest.raises(RuntimeError, match="429"):
+        client.complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+    assert calls["n"] == GROQ_RATE_LIMIT_RETRIES + 1
+    assert sleeps[0] == GROQ_RATE_LIMIT_WAIT_CAP_S
+    assert sleeps[1:] == [1.0, 1.0]
+
+
+def test_openai_rate_limit_is_not_retried():
+    calls = {"n": 0}
+
+    class FakeHttp:
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            del method, url, body, headers, timeout
+            calls["n"] += 1
+            return HttpResult(429, {"error": "rate_limit"}, {"Retry-After": "0"}, 1)
+
+    client = OpenAIChatClient(api_key="test-key", http=FakeHttp(), sleep=lambda _seconds: None)
+    with pytest.raises(RuntimeError, match="429"):
+        client.complete([{"role": "user", "content": "hi"}], model="gpt-6-luna")
+    assert calls["n"] == 1
+
+
+def test_cli_groq_uses_its_own_client_and_default_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    captured = {}
+
+    def fake_run(tasks, **kwargs):
+        del tasks
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr("runners.baseline.run_baseline", fake_run)
+    from runners.baseline import main
+
+    code = main(
+        [
+            "--provider",
+            "groq",
+            "--k",
+            "1",
+            "--output",
+            str(tmp_path / "out"),
+            "--tasks",
+            str(repo_root() / "tasks" / "baseline_100.txt"),
+        ]
+    )
+    assert code == 0
+    assert captured["provider"] == "groq"
+    assert captured["model"] == "openai/gpt-oss-20b"
+    assert captured["client"].api_key == "groq-test"
+    assert captured["client"].api_url == GROQ_API_URL
+    assert isinstance(captured["client"].http, UrllibHttpClient)
+    assert isinstance(captured["http"], UrllibHttpClient)
+    assert captured["client"].http is not captured["http"]
+    assert not isinstance(captured["http"], FaultProxy)
+    assert not isinstance(captured["client"].http, FaultProxy)
+
+    captured.clear()
+    code = main(
+        [
+            "--provider",
+            "groq",
+            "--model",
+            "openai/gpt-oss-120b",
+            "--k",
+            "1",
+            "--output",
+            str(tmp_path / "large"),
+            "--tasks",
+            str(repo_root() / "tasks" / "baseline_100.txt"),
+        ]
+    )
+    assert code == 0
+    assert captured["model"] == "openai/gpt-oss-120b"
+    assert captured["provider"] == "groq"
+
+
+def test_results_record_provider_next_to_fault_fields(tmp_path):
+    task = load_task_file()["task1_1"]
+    chart = Chart(task.eval_mrn)
+
+    def reply_for(assistant_turns, messages, model):
+        del assistant_turns, messages, model
+        return 'FINISH\n["S6534835"]'
+
+    rows = run_baseline(
+        [task],
+        k=1,
+        output_dir=tmp_path / "groq-row",
+        model="openai/gpt-oss-20b",
+        provider="groq",
+        client=ScriptedChat(reply_for),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=chart.reset,
+        fault="none",
+        seed=4,
+        mitigation="off",
+    )
+    row = rows[0]
+    assert row["provider"] == "groq"
+    assert row["model"] == "openai/gpt-oss-20b"
+    assert row["fault"] == "none"
+    assert row["seed"] == 4
+    assert row["mitigation"] == "off"
+    saved = load_results(tmp_path / "groq-row" / "results.jsonl")
+    assert saved[0]["provider"] == "groq"
+    assert saved[0]["model"] == "openai/gpt-oss-20b"
+    assert saved[0]["fault"] == "none"
+    assert saved[0]["seed"] == 4
+
+
 def test_k1_and_k5_reset_grade_and_save_the_prefix(tmp_path):
     tasks = load_task_file()
     task = tasks["task8_1"]
@@ -225,6 +456,8 @@ def test_k1_and_k5_reset_grade_and_save_the_prefix(tmp_path):
         reset=chart.reset,
     )
     assert len(rows) == 5
+    assert rows[0]["provider"] == "openai"
+    assert rows[0]["model"] == DEFAULT_MODEL
     assert chart.reset_count == 5
     assert all(row["state_passed"] and row["refsol_passed"] for row in rows)
     assert all(row["refsol_status"] == "graded" for row in rows)
@@ -237,6 +470,8 @@ def test_k1_and_k5_reset_grade_and_save_the_prefix(tmp_path):
     assert all(message["role"] != "assistant" for message in prefix["messages_before_post"])
     saved = load_results(tmp_path / "k5" / "results.jsonl")
     assert len(saved) == 5
+    assert saved[0]["provider"] == "openai"
+    assert saved[0]["model"] == DEFAULT_MODEL
     summary = agreement_counts(saved)
     assert summary["pass_pass"] == 5
     assert "transcript pass" in (tmp_path / "k5" / "agreement.txt").read_text()

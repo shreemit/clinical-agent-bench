@@ -3,8 +3,12 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
 import os
 import sys
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -20,8 +24,34 @@ from harness.types import AgentAction, TaskCase, ToolObservation
 from proxy.fault_proxy import FAULT_TYPES, MITIGATION_MODES, FaultProxy
 from tasks_io import load_task_file, repo_root
 
+logger = logging.getLogger(__name__)
+
+PROVIDERS = ("openai", "groq")
 DEFAULT_MODEL = "gpt-6-luna"
-API_URL = "https://api.openai.com/v1/chat/completions"
+GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+API_URL = OPENAI_API_URL
+GROQ_RATE_LIMIT_RETRIES = 3
+GROQ_RATE_LIMIT_WAIT_CAP_S = 8.0
+GROQ_RATE_LIMIT_DEFAULT_WAIT_S = 1.0
+
+_PROVIDER_CONFIG = {
+    "openai": {
+        "url": OPENAI_API_URL,
+        "env": "OPENAI_API_KEY",
+        "model": DEFAULT_MODEL,
+        "reasoning_effort": True,
+        "rate_limit_retries": 0,
+    },
+    "groq": {
+        "url": GROQ_API_URL,
+        "env": "GROQ_API_KEY",
+        "model": GROQ_DEFAULT_MODEL,
+        "reasoning_effort": False,
+        "rate_limit_retries": GROQ_RATE_LIMIT_RETRIES,
+    },
+}
 
 
 class MissingApiKeyError(RuntimeError):
@@ -32,15 +62,19 @@ class ChatClient(Protocol):
     def complete(self, messages: list[dict], model: str) -> str: ...
 
 
-def require_api_key() -> str:
-    """Return OPENAI_API_KEY or raise MissingApiKeyError."""
+def require_api_key(env_var: str = "OPENAI_API_KEY") -> str:
+    """Return the named API key or raise MissingApiKeyError."""
 
-    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    key = (os.environ.get(env_var) or "").strip()
     if not key:
-        raise MissingApiKeyError(
-            "OPENAI_API_KEY is not set. Export it before running the baseline."
-        )
+        raise MissingApiKeyError(f"{env_var} is not set. Export it before running the baseline.")
     return key
+
+
+def default_model(provider: str) -> str:
+    """Model used when --model is omitted."""
+
+    return _provider_config(provider)["model"]
 
 
 class OpenAIChatClient:
@@ -49,35 +83,54 @@ class OpenAIChatClient:
         api_key: str | None = None,
         http: HttpClient | None = None,
         reasoning_effort: str | None = "none",
+        provider: str = "openai",
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
+        config = _provider_config(provider)
+        env_var = config["env"]
         if api_key is None:
-            self.api_key = require_api_key()
+            self.api_key = require_api_key(env_var)
         else:
             self.api_key = api_key.strip()
             if not self.api_key:
                 raise MissingApiKeyError(
-                    "OPENAI_API_KEY is not set. Export it before running the baseline."
+                    f"{env_var} is not set. Export it before running the baseline."
                 )
+        self.provider = provider
+        self.api_url = config["url"]
+        self.send_reasoning_effort = bool(config["reasoning_effort"])
+        self.rate_limit_retries = int(config["rate_limit_retries"])
         self.http = http if http is not None else UrllibHttpClient()
         self.reasoning_effort = reasoning_effort
+        self._sleep = time.sleep if sleep is None else sleep
 
     def complete(self, messages: list[dict], model: str) -> str:
         """Send one chat completion and return the assistant text."""
 
-        body: dict[str, Any] = {"model": model, "messages": messages}
-        if self.reasoning_effort:
-            body["reasoning_effort"] = self.reasoning_effort
-        if self.reasoning_effort in (None, "none"):
-            body["temperature"] = 0
-        result = self.http.request(
-            "POST",
-            API_URL,
-            body=body,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+        body = _completion_body(
+            messages,
+            model,
+            self.reasoning_effort,
+            self.send_reasoning_effort,
         )
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        attempt = 0
+        while True:
+            result = self.http.request("POST", self.api_url, body=body, headers=headers)
+            if result.status != 429 or attempt >= self.rate_limit_retries:
+                break
+            attempt += 1
+            wait = _retry_after_seconds(result.headers)
+            logger.warning(
+                "Groq rate limit (429); retrying in %.2fs (%s/%s)",
+                wait,
+                attempt,
+                self.rate_limit_retries,
+            )
+            self._sleep(wait)
         if result.status != 200 or not isinstance(result.body, dict):
             raise RuntimeError(
                 f"chat completion failed with status {result.status}: {result.body}"
@@ -89,6 +142,67 @@ class OpenAIChatClient:
         if not isinstance(content, str):
             raise RuntimeError(f"chat completion content is not text: {content!r}")
         return content
+
+
+def _provider_config(provider: str) -> dict[str, Any]:
+    """Endpoint, key variable, and request options for one provider."""
+
+    try:
+        return _PROVIDER_CONFIG[provider]
+    except KeyError as error:
+        raise ValueError(f"unknown provider {provider}") from error
+
+
+def _completion_body(
+    messages: list[dict],
+    model: str,
+    reasoning_effort: str | None,
+    send_reasoning_effort: bool,
+) -> dict[str, Any]:
+    """JSON body for one chat completion."""
+
+    body: dict[str, Any] = {"model": model, "messages": messages}
+    if send_reasoning_effort and reasoning_effort:
+        body["reasoning_effort"] = reasoning_effort
+    if not send_reasoning_effort or reasoning_effort in (None, "none"):
+        body["temperature"] = 0
+    return body
+
+
+def _retry_after_seconds(headers: dict[str, str] | None) -> float:
+    """Seconds to wait after a 429, capped so one limit cannot stall a trial."""
+
+    raw = ""
+    for key, value in (headers or {}).items():
+        if key.lower() == "retry-after":
+            raw = str(value).strip()
+            break
+    wait = _parse_retry_after(raw)
+    if wait < 0:
+        wait = 0.0
+    if wait > GROQ_RATE_LIMIT_WAIT_CAP_S:
+        return GROQ_RATE_LIMIT_WAIT_CAP_S
+    return wait
+
+
+def _parse_retry_after(raw: str) -> float:
+    """Retry-After as seconds, or the default when the header is missing."""
+
+    if not raw:
+        return GROQ_RATE_LIMIT_DEFAULT_WAIT_S
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return GROQ_RATE_LIMIT_DEFAULT_WAIT_S
+    if parsed is None:
+        return GROQ_RATE_LIMIT_DEFAULT_WAIT_S
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (parsed - datetime.now(timezone.utc)).total_seconds()
 
 
 def load_task_ids(path: Path) -> list[str]:
@@ -268,6 +382,7 @@ def run_baseline(
     fault_attempt: int = 1,
     mitigation: str = "off",
     fault_log: Path | None = None,
+    provider: str = "openai",
 ) -> list[dict]:
     """Run k trials per task, grade each chart, and write prefixes and results."""
 
@@ -346,6 +461,7 @@ def run_baseline(
             row = {
                     "task_id": task.id,
                     "trial": trial,
+                    "provider": provider,
                     "model": model,
                     "fault": fault,
                     "seed": seed,
@@ -430,7 +546,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--k", type=int, default=1, help="trials per task (use 1 or 5)")
     parser.add_argument("--output", type=Path, default=repo_root() / "runs" / "baseline")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--provider",
+        choices=PROVIDERS,
+        default="openai",
+        help="chat completions provider (default: openai)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="model id (default: gpt-6-luna for openai, openai/gpt-oss-20b for groq)",
+    )
     parser.add_argument("--tasks", type=Path, default=repo_root() / "tasks" / "baseline_100.txt")
     parser.add_argument(
         "--refsol",
@@ -479,8 +605,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.fault_attempt < 1:
         print("fault-attempt must be at least 1", file=sys.stderr)
         return 2
+    model = args.model or default_model(args.provider)
     try:
-        client = OpenAIChatClient(reasoning_effort=args.reasoning_effort or None)
+        client = OpenAIChatClient(
+            reasoning_effort=args.reasoning_effort or None,
+            provider=args.provider,
+        )
     except MissingApiKeyError as error:
         print(str(error), file=sys.stderr)
         return 2
@@ -495,7 +625,8 @@ def main(argv: list[str] | None = None) -> int:
         selected,
         k=args.k,
         output_dir=args.output,
-        model=args.model,
+        model=model,
+        provider=args.provider,
         client=client,
         fhir_api_base=args.fhir_base,
         http=UrllibHttpClient(),
