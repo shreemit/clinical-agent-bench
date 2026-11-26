@@ -157,6 +157,26 @@ def test_parse_model_action_strips_fences():
     assert posted.body["resourceType"] == "Observation"
 
 
+def test_parse_model_action_ignores_a_trailing_finish_and_a_later_post():
+    posted = parse_model_action(
+        'POST http://fhir.test/fhir/Observation\n'
+        '{"resourceType": "Observation", "status": "final"}\n'
+        "FINISH\n"
+        "[]\n"
+    )
+    assert posted.kind == "POST"
+    assert posted.url == "http://fhir.test/fhir/Observation"
+    assert posted.body == {"resourceType": "Observation", "status": "final"}
+    read = parse_model_action(
+        "GET http://fhir.test/fhir/Patient/1\n"
+        "POST http://fhir.test/fhir/Observation\n"
+        '{"resourceType": "Observation"}\n'
+    )
+    assert read.kind == "GET"
+    assert read.url == "http://fhir.test/fhir/Patient/1"
+    assert read.body is None
+
+
 def test_missing_api_key_fails_before_any_request(monkeypatch, tmp_path, capsys):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
@@ -200,6 +220,7 @@ def test_chat_client_posts_the_configured_model():
     assert seen["body"]["model"] == DEFAULT_MODEL
     assert seen["body"]["temperature"] == 0
     assert seen["body"]["reasoning_effort"] == "none"
+    assert "max_completion_tokens" not in seen["body"]
     assert seen["headers"]["Authorization"] == "Bearer test-key"
     assert seen["headers"]["User-Agent"] == f"clinical-agent-bench/{version('clinical-agent-bench-exec')}"
 
@@ -232,6 +253,7 @@ def test_groq_chat_client_omits_reasoning_effort():
     assert seen["url"] == GROQ_API_URL
     assert seen["body"]["model"] == "openai/gpt-oss-20b"
     assert seen["body"]["temperature"] == 0
+    assert seen["body"]["max_completion_tokens"] == 4096
     assert "reasoning_effort" not in seen["body"]
     assert seen["headers"]["Authorization"] == "Bearer groq-key"
     assert seen["headers"]["Content-Type"] == "application/json"
@@ -318,7 +340,8 @@ def test_groq_caps_retry_after_and_stops_when_still_limited():
     with pytest.raises(RuntimeError, match="429"):
         client.complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
     assert calls["n"] == GROQ_RATE_LIMIT_RETRIES + 1
-    assert sleeps[0] == GROQ_RATE_LIMIT_WAIT_CAP_S
+    assert GROQ_RATE_LIMIT_WAIT_CAP_S == 30.0
+    assert sleeps[0] == 30.0
     assert sleeps[1:] == [1.0, 1.0]
 
 
@@ -338,6 +361,292 @@ def test_chat_403_error_names_the_status():
     assert "403" in message
     assert "1010" in message
     assert seen["headers"]["User-Agent"] == f"clinical-agent-bench/{version('clinical-agent-bench-exec')}"
+
+
+def _gpt_oss_body(content, finish_reason, reasoning, reasoning_tokens=None):
+    message = {"role": "assistant", "content": content, "reasoning": reasoning}
+    body = {"choices": [{"finish_reason": finish_reason, "message": message}]}
+    if reasoning_tokens is not None:
+        body["usage"] = {"completion_tokens_details": {"reasoning_tokens": reasoning_tokens}}
+    return body
+
+
+def _groq_client(http, sleep=None):
+    return OpenAIChatClient(
+        api_key="groq-key",
+        http=http,
+        provider="groq",
+        sleep=sleep,
+    )
+
+
+class _ScriptedHttp:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def request(self, method, url, body=None, headers=None, timeout=None):
+        self.calls.append({"method": method, "url": url, "body": body, "headers": headers})
+        status, payload, response_headers = self.responses.pop(0)
+        return HttpResult(status, payload, response_headers, 1)
+
+
+def test_gpt_oss_stop_returns_content_and_not_reasoning():
+    http = _ScriptedHttp(
+        [
+            (
+                200,
+                _gpt_oss_body(
+                    "GET http://127.0.0.1:8080/fhir/Patient/1",
+                    "stop",
+                    "I should look up the patient. STOP_REASONING",
+                    reasoning_tokens=12,
+                ),
+                {},
+            )
+        ]
+    )
+    text = _groq_client(http).complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+    assert text == "GET http://127.0.0.1:8080/fhir/Patient/1"
+    assert "STOP_REASONING" not in text
+    assert http.calls[0]["body"]["max_completion_tokens"] == 4096
+
+
+def test_gpt_oss_length_with_empty_or_partial_content_is_not_executed():
+    empty = _ScriptedHttp(
+        [
+            (
+                200,
+                _gpt_oss_body(
+                    "",
+                    "length",
+                    "GET http://127.0.0.1:8080/fhir/Patient/REASONING_ONLY",
+                    reasoning_tokens=4096,
+                ),
+                {},
+            )
+        ]
+    )
+    with pytest.raises(RuntimeError, match=r"finish_reason=length") as empty_error:
+        _groq_client(empty).complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+    empty_text = str(empty_error.value)
+    assert "reasoning_tokens=4096" in empty_text
+    assert "REASONING_ONLY" not in empty_text
+
+    partial = _ScriptedHttp(
+        [
+            (
+                200,
+                _gpt_oss_body(
+                    "GET http://127.0.0.1:8080/fhir/Patient/PARTIAL_ONLY",
+                    "length",
+                    "still thinking PARTIAL_REASONING",
+                    reasoning_tokens=100,
+                ),
+                {},
+            )
+        ]
+    )
+    with pytest.raises(RuntimeError, match=r"finish_reason=length") as partial_error:
+        _groq_client(partial).complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+    partial_text = str(partial_error.value)
+    assert "reasoning_tokens=100" in partial_text
+    assert "PARTIAL_ONLY" not in partial_text
+    assert "PARTIAL_REASONING" not in partial_text
+
+
+def test_null_content_names_finish_reason():
+    http = _ScriptedHttp(
+        [
+            (
+                200,
+                _gpt_oss_body(None, "stop", "NULL_REASONING_NOT_USED"),
+                {},
+            )
+        ]
+    )
+    with pytest.raises(RuntimeError, match=r"finish_reason=stop") as caught:
+        _groq_client(http).complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+    assert "empty" in str(caught.value)
+    assert "NULL_REASONING_NOT_USED" not in str(caught.value)
+
+
+def test_tool_use_failed_recovers_both_argument_shapes(caplog):
+    object_args = json.dumps(
+        {
+            "name": "assistant",
+            "arguments": {
+                "action": "GET",
+                "url": (
+                    "http://127.0.0.1:8080/fhir/Patient"
+                    "?name=Peter%20Stafford&birthdate=1932-12-29"
+                ),
+            },
+        }
+    )
+    string_args = json.dumps(
+        {
+            "name": "assistant",
+            "arguments": "GET http://127.0.0.1:8080/fhir/Patient/9",
+        }
+    )
+    plain = "POST http://fhir.test/fhir/Observation\n" + json.dumps(
+        {"resourceType": "Observation"}
+    )
+    payload_args = json.dumps(
+        {
+            "name": "assistant",
+            "arguments": {
+                "action": "PUT",
+                "url": "http://fhir.test/fhir/Observation/1",
+                "payload": {"resourceType": "Observation", "id": "1"},
+            },
+        }
+    )
+    cases = [
+        (object_args, "GET", "Peter%20Stafford"),
+        (string_args, "GET", "/Patient/9"),
+        (plain, "POST", "Observation"),
+        (payload_args, "PUT", "Observation/1"),
+    ]
+    for failed_generation, kind, needle in cases:
+        http = _ScriptedHttp(
+            [
+                (
+                    400,
+                    {
+                        "error": {
+                            "code": "tool_use_failed",
+                            "message": "Tool choice is none, but model called a tool",
+                            "failed_generation": failed_generation,
+                        }
+                    },
+                    {},
+                )
+            ]
+        )
+        with caplog.at_level(logging.WARNING):
+            text = _groq_client(http).complete(
+                [{"role": "user", "content": "hi"}],
+                model="openai/gpt-oss-20b",
+            )
+        action = parse_model_action(text)
+        assert action.kind == kind
+        assert needle in (action.url or "")
+        assert "recovered chat action" in caplog.text
+        caplog.clear()
+
+
+def test_tool_use_failed_without_an_action_is_a_short_http_400(caplog):
+    secret = "failed_generation should stay out of the error"
+    http = _ScriptedHttp(
+        [
+            (
+                400,
+                {
+                    "error": {
+                        "code": "tool_use_failed",
+                        "message": "Tool choice is none, but model called a tool",
+                        "failed_generation": secret,
+                    }
+                },
+                {},
+            )
+        ]
+    )
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(RuntimeError, match=r"HTTP 400: tool_use_failed$") as caught:
+            _groq_client(http).complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+    assert secret not in str(caught.value)
+    assert "recovered" not in caplog.text
+    assert len(http.calls) == 1
+
+
+def test_non_finite_retry_after_waits_one_second(caplog):
+    for header in ("nan", "inf", "-inf", "NaN", "-5", "Infinity"):
+        http = _ScriptedHttp(
+            [
+                (429, {"error": {"message": "slow", "code": "rate_limit_exceeded"}}, {"Retry-After": header}),
+                (200, {"choices": [{"message": {"content": "FINISH\n[]"}}]}, {}),
+            ]
+        )
+        sleeps = []
+        text = _groq_client(http, sleep=sleeps.append).complete(
+            [{"role": "user", "content": "hi"}],
+            model="openai/gpt-oss-20b",
+        )
+        assert text == "FINISH\n[]"
+        assert sleeps == [1.0], header
+
+
+def test_groq_retries_413_when_the_request_fits_the_limit():
+    message = "Tokens per minute exceeded. Limit 8000, Requested 8000."
+    http = _ScriptedHttp(
+        [
+            (
+                413,
+                {"error": {"code": "rate_limit_exceeded", "message": message}},
+                {"Retry-After": "2"},
+            ),
+            (200, {"choices": [{"message": {"content": "FINISH\n[]"}}]}, {}),
+        ]
+    )
+    sleeps = []
+    text = _groq_client(http, sleep=sleeps.append).complete(
+        [{"role": "user", "content": "hi"}],
+        model="openai/gpt-oss-20b",
+    )
+    assert text == "FINISH\n[]"
+    assert sleeps == [2.0]
+    assert len(http.calls) == 2
+
+
+def test_groq_413_over_the_limit_fails_without_retry():
+    message = "Request too large. Limit 8000, Requested 12000."
+    http = _ScriptedHttp(
+        [
+            (
+                413,
+                {"error": {"code": "rate_limit_exceeded", "message": message}},
+                {"Retry-After": "1"},
+            )
+        ]
+    )
+    sleeps = []
+    with pytest.raises(RuntimeError, match=r"HTTP 413") as caught:
+        _groq_client(http, sleep=sleeps.append).complete(
+            [{"role": "user", "content": "hi"}],
+            model="openai/gpt-oss-20b",
+        )
+    text = str(caught.value)
+    assert "requested 12000 tokens exceeds limit 8000" in text
+    assert sleeps == []
+    assert len(http.calls) == 1
+
+
+def test_api_key_with_a_newline_is_rejected_without_quoting_it(monkeypatch):
+    class Boom:
+        def request(self, *args, **kwargs):
+            raise AssertionError("HTTP was called")
+
+    secret = "sk-live-secret-value\r\nX-Injected: yes"
+    with pytest.raises(MissingApiKeyError) as caught:
+        OpenAIChatClient(api_key=secret, http=Boom(), provider="groq")
+    text = str(caught.value)
+    assert "sk-live-secret-value" not in text
+    assert "X-Injected" not in text
+    assert "line feed" in text
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-secret\n")
+    with pytest.raises(MissingApiKeyError) as from_env:
+        OpenAIChatClient(http=Boom())
+    assert "sk-env-secret" not in str(from_env.value)
+
+
+def test_transport_status_zero_is_not_called_http_zero():
+    http = _ScriptedHttp([(0, {"error": "timed out"}, {})])
+    with pytest.raises(RuntimeError, match=r"^transport error: timed out$") as caught:
+        _groq_client(http).complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+    assert "HTTP 0" not in str(caught.value)
 
 
 def test_openai_rate_limit_is_not_retried():
@@ -385,6 +694,7 @@ def test_cli_groq_uses_its_own_client_and_default_model(monkeypatch, tmp_path):
     assert captured["model"] == "openai/gpt-oss-20b"
     assert captured["client"].api_key == "groq-test"
     assert captured["client"].api_url == GROQ_API_URL
+    assert captured["client"].max_completion_tokens == 4096
     assert isinstance(captured["client"].http, UrllibHttpClient)
     assert isinstance(captured["http"], UrllibHttpClient)
     assert captured["client"].http is not captured["http"]
@@ -398,6 +708,8 @@ def test_cli_groq_uses_its_own_client_and_default_model(monkeypatch, tmp_path):
             "groq",
             "--model",
             "openai/gpt-oss-120b",
+            "--max-completion-tokens",
+            "2048",
             "--k",
             "1",
             "--output",
@@ -409,6 +721,7 @@ def test_cli_groq_uses_its_own_client_and_default_model(monkeypatch, tmp_path):
     assert code == 0
     assert captured["model"] == "openai/gpt-oss-120b"
     assert captured["provider"] == "groq"
+    assert captured["client"].max_completion_tokens == 2048
 
 
 def test_results_record_provider_next_to_fault_fields(tmp_path):
