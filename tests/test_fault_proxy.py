@@ -336,7 +336,33 @@ def test_hidden_put_does_not_advance_if_match(tmp_path):
     proxy.request("PUT", "http://fhir.test/fhir/Observation/5", body={"resourceType": "Observation", "id": "5"})
     assert recorder.calls[1]["headers"]["If-Match"] == 'W/"1"'
     assert recorder.calls[2]["headers"]["If-Match"] == 'W/"1"'
-    assert any(location.endswith("/Observation/5/_history/2") for location in proxy.committed_locations())
+    assert "http://fhir.test/fhir/Observation/5/_history/2" in proxy.committed_locations()
+
+
+def test_relative_location_resolves_without_doubling_resource_type(tmp_path):
+    created = HttpResult(
+        201,
+        {"resourceType": "Observation", "id": "5", "meta": {"versionId": "1"}},
+        {"Location": "Observation/5/_history/1", "ETag": 'W/"1"'},
+        1,
+    )
+    updated = HttpResult(
+        200,
+        {"resourceType": "Observation", "id": "5", "meta": {"versionId": "2"}},
+        {"Location": "Observation/5/_history/2", "ETag": 'W/"2"'},
+        1,
+    )
+    recorder = Recorder([created, updated])
+    proxy = _proxy(recorder, tmp_path, mitigation="preconditions")
+    proxy.request("POST", URL + "/", body=dict(POST_BODY))
+    proxy.request("PUT", URL + "/5", body={"resourceType": "Observation", "id": "5"})
+    assert proxy.committed_locations() == [
+        "http://fhir.test/fhir/Observation/5/_history/1",
+        "http://fhir.test/fhir/Observation/5/_history/2",
+    ]
+    assert recorder.calls[1]["headers"]["If-Match"] == 'W/"1"'
+    proxy.request("PUT", URL + "/5", body={"resourceType": "Observation", "id": "5"})
+    assert recorder.calls[2]["headers"]["If-Match"] == 'W/"2"'
 
 
 def test_duplicate_retry_still_forwards_twice_when_preconditions_are_on(tmp_path):
@@ -574,6 +600,50 @@ def test_preconditions_do_not_hide_an_agent_duplicate(tmp_path):
     assert len(stored) == 2
     assert rows[0]["state_passed"] is False
     assert rows[0]["fault_fired"] is False
+
+
+def test_grader_reads_bypass_proxy_etags_and_fault_log(tmp_path):
+    task = load_task_file()["task8_1"]
+    patient_url = f"http://fhir.test/fhir/Patient/{task.eval_mrn}"
+    put_action = f"PUT {patient_url}\n" + json.dumps({"resourceType": "Patient", "id": task.eval_mrn})
+    put_headers = []
+
+    class PatientPutChart(Chart):
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            if method == "GET" and f"/Patient/{self.patient_id}" in url and "?" not in url:
+                res = super().request(method, url, body=body, headers=headers, timeout=timeout)
+                return HttpResult(res.status, res.body, {**res.headers, "ETag": 'W/"1"'}, res.elapsed_ms)
+            if method == "PUT":
+                put_headers.append(dict(headers or {}))
+                return HttpResult(200, body, {"Location": f"Patient/{self.patient_id}/_history/2", "ETag": 'W/"2"'}, 1)
+            return super().request(method, url, body=body, headers=headers, timeout=timeout)
+
+    def reply(turns, _messages, _model):
+        if turns == 0:
+            return put_action
+        return "FINISH\n[]"
+
+    chart = PatientPutChart(task.eval_mrn)
+    out = tmp_path / "grader_bypass"
+    run_baseline(
+        [task],
+        k=1,
+        output_dir=out,
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(reply),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=chart.reset,
+        fault="none",
+        mitigation="preconditions",
+    )
+    assert len(put_headers) == 1
+    assert "If-Match" not in put_headers[0]
+    logged = _lines(out / "faults.jsonl")
+    assert len(logged) == 1
+    assert logged[0]["method"] == "PUT"
+    assert logged[0]["url"] == patient_url
 
 
 def _existing_for_if_none_exist(resources, headers):

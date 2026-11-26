@@ -7,7 +7,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from harness.http_client import HttpClient, HttpResult
 
@@ -416,6 +416,15 @@ def _absolute(url: str, base: str) -> str:
         return url
     if url.startswith("/"):
         return urljoin(base, url)
+    head = url.split("/", 1)[0]
+    if head:
+        parsed = urlsplit(base)
+        parts = parsed.path.rstrip("/").split("/")
+        for index in range(len(parts) - 1, 0, -1):
+            if parts[index] == head:
+                prefix = "/".join(parts[:index]) + "/"
+                root = urlunsplit((parsed.scheme, parsed.netloc, prefix, "", ""))
+                return urljoin(root, url)
     root = base.split("?", 1)[0]
     if not root.endswith("/"):
         root = root.rsplit("/", 1)[0] + "/"
