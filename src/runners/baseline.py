@@ -303,15 +303,15 @@ def run_baseline(
                 else:
                     reset()
             proxy.begin_trial(f"{task.id}:{trial}", task.id)
-            pre = collect_patient_state(proxy, fhir_api_base, patient_id)
+            pre = collect_patient_state(http, fhir_api_base, patient_id)
             pre_ids = resource_ids(pre)
             if initial_ids is None:
                 initial_ids = pre_ids
             agent = PromptAgent(task, fhir_api_base, client, model)
             record = harness.run(task, agent)
             post = merge_resources(
-                collect_patient_state(proxy, fhir_api_base, patient_id),
-                read_locations(proxy, fhir_api_base, _locations_for_grade(proxy, record)),
+                collect_patient_state(http, fhir_api_base, patient_id),
+                read_locations(http, fhir_api_base, _locations_for_grade(proxy, record)),
             )
             gold = gold_spec_for_task(task, pre)
             state = grade_trial_state(pre, post, gold, record.finish_text or "")
@@ -347,6 +347,10 @@ def run_baseline(
                     "task_id": task.id,
                     "trial": trial,
                     "model": model,
+                    "fault": fault,
+                    "seed": seed,
+                    "mitigation": mitigation,
+                    "fault_fired": proxy.fault_fired,
                     "reset": not no_reset,
                     "contaminated": sorted(pre_ids) != sorted(initial_ids),
                     "state_passed": state_passed,

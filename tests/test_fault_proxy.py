@@ -218,7 +218,7 @@ def test_unknown_fault_and_attempt_are_rejected():
         FaultProxy(Recorder(), mitigation="client")
 
 
-def test_preconditions_reuse_one_identifier_per_logical_post(tmp_path):
+def test_preconditions_give_each_successful_post_its_own_identifier(tmp_path):
     recorder = Recorder()
     proxy = _proxy(
         recorder,
@@ -226,29 +226,143 @@ def test_preconditions_reuse_one_identifier_per_logical_post(tmp_path):
         mitigation="preconditions",
         trial_id="7",
         task_id="task8_1",
+        run_id="run",
     )
     body = dict(POST_BODY)
     proxy.request("POST", URL, body=body, headers={"Content-Type": "application/fhir+json"})
     proxy.request("POST", URL, body=body, headers={"Content-Type": "application/fhir+json"})
     assert "identifier" not in body
     first, second = recorder.calls[0], recorder.calls[1]
-    assert first["body"]["identifier"] == second["body"]["identifier"]
-    assert first["headers"]["If-None-Exist"] == second["headers"]["If-None-Exist"]
+    assert first["body"]["identifier"] != second["body"]["identifier"]
     assert first["body"]["identifier"][-1] == {
         "system": IDEMPOTENCY_SYSTEM,
-        "value": "7:task8_1:Observation:1",
+        "value": "run:7:task8_1:Observation:1",
     }
+    assert second["body"]["identifier"][-1]["value"] == "run:7:task8_1:Observation:2"
     decoded = unquote(first["headers"]["If-None-Exist"].split("=", 1)[1])
-    assert decoded == IDEMPOTENCY_SYSTEM + "|7:task8_1:Observation:1"
+    assert decoded == IDEMPOTENCY_SYSTEM + "|run:7:task8_1:Observation:1"
     assert first["headers"]["Content-Type"] == "application/fhir+json"
     proxy.request("POST", URL, body={"resourceType": "Observation", "status": "amended"})
-    assert recorder.calls[2]["body"]["identifier"][-1]["value"] == "7:task8_1:Observation:2"
+    assert recorder.calls[2]["body"]["identifier"][-1]["value"] == "run:7:task8_1:Observation:3"
     proxy.request(
         "POST",
         "http://fhir.test/fhir/MedicationRequest",
         body={"resourceType": "MedicationRequest", "status": "active"},
     )
-    assert recorder.calls[3]["body"]["identifier"][-1]["value"] == "7:task8_1:MedicationRequest:1"
+    assert recorder.calls[3]["body"]["identifier"][-1]["value"] == "run:7:task8_1:MedicationRequest:1"
+
+
+def test_failed_post_retry_reuses_one_identifier(tmp_path):
+    denied = HttpResult(409, {"resourceType": "OperationOutcome"}, {}, 1)
+    recorder = Recorder([denied])
+    proxy = _proxy(recorder, tmp_path, mitigation="preconditions", trial_id="7", task_id="task8_1", run_id="run")
+    body = dict(POST_BODY)
+    assert proxy.request("POST", URL, body=body).status == 409
+    proxy.request("GET", URL + "?patient=1")
+    assert proxy.request("POST", URL, body=body).status == 201
+    assert recorder.calls[0]["body"]["identifier"] == recorder.calls[2]["body"]["identifier"]
+    assert recorder.calls[0]["headers"]["If-None-Exist"] == recorder.calls[2]["headers"]["If-None-Exist"]
+    assert proxy.request("POST", URL, body=body).status == 201
+    assert recorder.calls[3]["body"]["identifier"][-1]["value"] == "run:7:task8_1:Observation:2"
+
+
+def test_a_later_write_cancels_identifier_reuse(tmp_path):
+    recorder = Recorder()
+    proxy = _proxy(
+        recorder,
+        tmp_path,
+        fault="conflict_409",
+        mitigation="preconditions",
+        trial_id="7",
+        task_id="task8_1",
+        run_id="run",
+    )
+    body = dict(POST_BODY)
+    assert proxy.request("POST", URL, body=body).status == 409
+    assert proxy.request("PUT", URL + "/1", body={"resourceType": "Observation", "id": "1"}).status == 200
+    proxy.request("POST", URL, body=body)
+    assert recorder.calls[-1]["body"]["identifier"][-1]["value"] == "run:7:task8_1:Observation:2"
+
+
+def test_run_id_keeps_identifiers_apart_across_runs(tmp_path):
+    kwargs = {"mitigation": "preconditions", "trial_id": "task8_1:0", "task_id": "task8_1"}
+    left_rec, right_rec = Recorder(), Recorder()
+    left = _proxy(left_rec, tmp_path / "a", **kwargs)
+    right = _proxy(right_rec, tmp_path / "b", **kwargs)
+    left.request("POST", URL, body=dict(POST_BODY))
+    right.request("POST", URL, body=dict(POST_BODY))
+    left_value = left_rec.calls[0]["body"]["identifier"][-1]["value"]
+    right_value = right_rec.calls[0]["body"]["identifier"][-1]["value"]
+    assert left_value != right_value
+    assert left_value.endswith(":task8_1:0:task8_1:Observation:1")
+    assert right_value.endswith(":task8_1:0:task8_1:Observation:1")
+    kept = left.run_id
+    left.begin_trial("other", "task9_1")
+    assert left.run_id == kept
+
+
+def test_fault_fired_is_per_trial(tmp_path):
+    proxy = _proxy(Recorder(), tmp_path, fault="conflict_409", on_attempt=2)
+    assert proxy.fault_fired is False
+    assert proxy.request("POST", URL, body=dict(POST_BODY)).status == 201
+    assert proxy.fault_fired is False
+    proxy.request("GET", "http://fhir.test/fhir/Patient/1")
+    assert proxy.request("POST", URL, body=dict(POST_BODY)).status == 409
+    assert proxy.fault_fired is True
+    proxy.begin_trial("1", "task8_1")
+    assert proxy.fault_fired is False
+    assert proxy.request("GET", "http://fhir.test/fhir/Patient/1").status == 200
+    assert proxy.fault_fired is False
+
+
+def test_hidden_put_does_not_advance_if_match(tmp_path):
+    created = HttpResult(
+        201,
+        {"resourceType": "Observation", "id": "5", "meta": {"versionId": "1"}},
+        {"Location": "Observation/5/_history/1", "ETag": 'W/"1"'},
+        1,
+    )
+    updated = HttpResult(
+        200,
+        {"resourceType": "Observation", "id": "5", "meta": {"versionId": "2"}},
+        {"Location": "Observation/5/_history/2", "ETag": 'W/"2"'},
+        1,
+    )
+    recorder = Recorder([created, updated])
+    proxy = _proxy(recorder, tmp_path, fault="committed_timeout", on_attempt=2, mitigation="preconditions")
+    proxy.request("POST", URL, body=dict(POST_BODY))
+    hidden = proxy.request("PUT", "http://fhir.test/fhir/Observation/5", body={"resourceType": "Observation", "id": "5"})
+    assert hidden.status == 504
+    proxy.request("PUT", "http://fhir.test/fhir/Observation/5", body={"resourceType": "Observation", "id": "5"})
+    assert recorder.calls[1]["headers"]["If-Match"] == 'W/"1"'
+    assert recorder.calls[2]["headers"]["If-Match"] == 'W/"1"'
+    assert "http://fhir.test/fhir/Observation/5/_history/2" in proxy.committed_locations()
+
+
+def test_relative_location_resolves_without_doubling_resource_type(tmp_path):
+    created = HttpResult(
+        201,
+        {"resourceType": "Observation", "id": "5", "meta": {"versionId": "1"}},
+        {"Location": "Observation/5/_history/1", "ETag": 'W/"1"'},
+        1,
+    )
+    updated = HttpResult(
+        200,
+        {"resourceType": "Observation", "id": "5", "meta": {"versionId": "2"}},
+        {"Location": "Observation/5/_history/2", "ETag": 'W/"2"'},
+        1,
+    )
+    recorder = Recorder([created, updated])
+    proxy = _proxy(recorder, tmp_path, mitigation="preconditions")
+    proxy.request("POST", URL + "/", body=dict(POST_BODY))
+    proxy.request("PUT", URL + "/5", body={"resourceType": "Observation", "id": "5"})
+    assert proxy.committed_locations() == [
+        "http://fhir.test/fhir/Observation/5/_history/1",
+        "http://fhir.test/fhir/Observation/5/_history/2",
+    ]
+    assert recorder.calls[1]["headers"]["If-Match"] == 'W/"1"'
+    proxy.request("PUT", URL + "/5", body={"resourceType": "Observation", "id": "5"})
+    assert recorder.calls[2]["headers"]["If-Match"] == 'W/"2"'
 
 
 def test_duplicate_retry_still_forwards_twice_when_preconditions_are_on(tmp_path):
@@ -340,6 +454,10 @@ def test_state_grade_sees_a_committed_timeout(tmp_path):
     assert rows[0]["state_passed"] is True
     assert any(item.startswith("ServiceRequest/") for item in rows[0]["created"])
     assert "504" in rows[0]["failure_reason"]
+    assert rows[0]["fault"] == "committed_timeout"
+    assert rows[0]["seed"] == 0
+    assert rows[0]["mitigation"] == "off"
+    assert rows[0]["fault_fired"] is True
     posts = [row for row in _lines(tmp_path / "grade" / "faults.jsonl") if row["method"] == "POST"]
     assert posts[0]["status"] == 504
     assert posts[0]["upstream_status"] == 201
@@ -414,3 +532,130 @@ def test_preconditions_do_not_break_the_state_grade(tmp_path):
     assert rows[0]["state_passed"] is True
     stored = [item for item in chart.resources if item.get("resourceType") == "ServiceRequest"]
     assert stored[0]["identifier"][0]["system"] == IDEMPOTENCY_SYSTEM
+
+
+def test_a_trial_with_no_write_records_that_the_fault_did_not_fire(tmp_path):
+    task = load_task_file()["task8_1"]
+    chart = Chart(task.eval_mrn)
+    rows = run_baseline(
+        [task],
+        k=1,
+        output_dir=tmp_path / "nowrite",
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(lambda _turns, _messages, _model: "FINISH\n[]"),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=chart.reset,
+        fault="conflict_409",
+        seed=3,
+        mitigation="preconditions",
+    )
+    assert rows[0]["fault"] == "conflict_409"
+    assert rows[0]["seed"] == 3
+    assert rows[0]["mitigation"] == "preconditions"
+    assert rows[0]["fault_fired"] is False
+    assert rows[0]["state_passed"] is False
+
+
+def test_preconditions_do_not_hide_an_agent_duplicate(tmp_path):
+    task = load_task_file()["task8_1"]
+    body = service_request(
+        task.eval_mrn,
+        "http://snomed.info/sct",
+        require_snomed(task.context),
+        note=first_quoted(task.instruction),
+    )
+    posted = "POST http://fhir.test/fhir/ServiceRequest\n" + json.dumps(body)
+
+    class ConditionalChart(Chart):
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            if method == "POST":
+                existing = _existing_for_if_none_exist(self.resources, headers)
+                if existing is not None:
+                    location = url.rstrip("/") + f"/{existing['id']}/_history/1"
+                    return HttpResult(200, existing, {"Location": location, "ETag": 'W/"1"'}, 1)
+            return super().request(method, url, body=body, headers=headers, timeout=timeout)
+
+    def reply(turns, _messages, _model):
+        if turns < 2:
+            return posted
+        return "FINISH\n[]"
+
+    chart = ConditionalChart(task.eval_mrn)
+    rows = run_baseline(
+        [task],
+        k=1,
+        output_dir=tmp_path / "dup",
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(reply),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=chart.reset,
+        fault="none",
+        mitigation="preconditions",
+    )
+    stored = [item for item in chart.resources if item.get("resourceType") == "ServiceRequest"]
+    assert len(stored) == 2
+    assert rows[0]["state_passed"] is False
+    assert rows[0]["fault_fired"] is False
+
+
+def test_grader_reads_bypass_proxy_etags_and_fault_log(tmp_path):
+    task = load_task_file()["task8_1"]
+    patient_url = f"http://fhir.test/fhir/Patient/{task.eval_mrn}"
+    put_action = f"PUT {patient_url}\n" + json.dumps({"resourceType": "Patient", "id": task.eval_mrn})
+    put_headers = []
+
+    class PatientPutChart(Chart):
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            if method == "GET" and f"/Patient/{self.patient_id}" in url and "?" not in url:
+                res = super().request(method, url, body=body, headers=headers, timeout=timeout)
+                return HttpResult(res.status, res.body, {**res.headers, "ETag": 'W/"1"'}, res.elapsed_ms)
+            if method == "PUT":
+                put_headers.append(dict(headers or {}))
+                return HttpResult(200, body, {"Location": f"Patient/{self.patient_id}/_history/2", "ETag": 'W/"2"'}, 1)
+            return super().request(method, url, body=body, headers=headers, timeout=timeout)
+
+    def reply(turns, _messages, _model):
+        if turns == 0:
+            return put_action
+        return "FINISH\n[]"
+
+    chart = PatientPutChart(task.eval_mrn)
+    out = tmp_path / "grader_bypass"
+    run_baseline(
+        [task],
+        k=1,
+        output_dir=out,
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(reply),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=chart.reset,
+        fault="none",
+        mitigation="preconditions",
+    )
+    assert len(put_headers) == 1
+    assert "If-Match" not in put_headers[0]
+    logged = _lines(out / "faults.jsonl")
+    assert len(logged) == 1
+    assert logged[0]["method"] == "PUT"
+    assert logged[0]["url"] == patient_url
+
+
+def _existing_for_if_none_exist(resources, headers):
+    token = None
+    for key, value in (headers or {}).items():
+        if key.lower() == "if-none-exist":
+            token = value
+    if not token or "=" not in token:
+        return None
+    system, _, value = unquote(token.split("=", 1)[1]).partition("|")
+    for resource in resources:
+        for identifier in resource.get("identifier") or []:
+            if identifier.get("system") == system and identifier.get("value") == value:
+                return resource
+    return None
