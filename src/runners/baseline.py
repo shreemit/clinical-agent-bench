@@ -9,6 +9,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -35,6 +36,8 @@ API_URL = OPENAI_API_URL
 GROQ_RATE_LIMIT_RETRIES = 3
 GROQ_RATE_LIMIT_WAIT_CAP_S = 8.0
 GROQ_RATE_LIMIT_DEFAULT_WAIT_S = 1.0
+_DISTRIBUTION = "clinical-agent-bench-exec"
+_USER_AGENT_VERSION_FALLBACK = "0.1.0"
 
 _PROVIDER_CONFIG = {
     "openai": {
@@ -77,6 +80,16 @@ def default_model(provider: str) -> str:
     return _provider_config(provider)["model"]
 
 
+def chat_user_agent() -> str:
+    """User-Agent sent on every chat completion request."""
+
+    try:
+        package_version = version(_DISTRIBUTION)
+    except PackageNotFoundError:
+        package_version = _USER_AGENT_VERSION_FALLBACK
+    return f"clinical-agent-bench/{package_version}"
+
+
 class OpenAIChatClient:
     def __init__(
         self,
@@ -116,6 +129,7 @@ class OpenAIChatClient:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "User-Agent": chat_user_agent(),
         }
         attempt = 0
         while True:
@@ -133,7 +147,7 @@ class OpenAIChatClient:
             self._sleep(wait)
         if result.status != 200 or not isinstance(result.body, dict):
             raise RuntimeError(
-                f"chat completion failed with status {result.status}: {result.body}"
+                f"chat completion failed with HTTP {result.status}: {result.body}"
             )
         try:
             content = result.body["choices"][0]["message"]["content"]

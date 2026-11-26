@@ -2,6 +2,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -200,6 +201,7 @@ def test_chat_client_posts_the_configured_model():
     assert seen["body"]["temperature"] == 0
     assert seen["body"]["reasoning_effort"] == "none"
     assert seen["headers"]["Authorization"] == "Bearer test-key"
+    assert seen["headers"]["User-Agent"] == f"clinical-agent-bench/{version('clinical-agent-bench-exec')}"
 
 
 def test_groq_chat_client_omits_reasoning_effort():
@@ -233,6 +235,8 @@ def test_groq_chat_client_omits_reasoning_effort():
     assert "reasoning_effort" not in seen["body"]
     assert seen["headers"]["Authorization"] == "Bearer groq-key"
     assert seen["headers"]["Content-Type"] == "application/json"
+    assert seen["headers"]["User-Agent"].startswith("clinical-agent-bench/")
+    assert seen["headers"]["User-Agent"] == f"clinical-agent-bench/{version('clinical-agent-bench-exec')}"
 
 
 def test_groq_missing_api_key_fails_before_any_request(monkeypatch, tmp_path, capsys):
@@ -316,6 +320,24 @@ def test_groq_caps_retry_after_and_stops_when_still_limited():
     assert calls["n"] == GROQ_RATE_LIMIT_RETRIES + 1
     assert sleeps[0] == GROQ_RATE_LIMIT_WAIT_CAP_S
     assert sleeps[1:] == [1.0, 1.0]
+
+
+def test_chat_403_error_names_the_status():
+    seen = {}
+
+    class FakeHttp:
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            del method, url, body, timeout
+            seen["headers"] = headers
+            return HttpResult(403, "error code: 1010", {}, 1)
+
+    client = OpenAIChatClient(api_key="groq-key", http=FakeHttp(), provider="groq")
+    with pytest.raises(RuntimeError, match=r"HTTP 403") as caught:
+        client.complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+    message = str(caught.value)
+    assert "403" in message
+    assert "1010" in message
+    assert seen["headers"]["User-Agent"] == f"clinical-agent-bench/{version('clinical-agent-bench-exec')}"
 
 
 def test_openai_rate_limit_is_not_retried():
