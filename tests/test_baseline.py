@@ -7,23 +7,30 @@ from pathlib import Path
 
 import pytest
 
-from agent.fhir_rules import first_quoted, require_snomed
-from agent.payloads import blood_pressure_observation, service_request
+from agent.fhir_rules import first_quoted, require_bp_code, require_ndc, require_snomed
+from agent.payloads import blood_pressure_observation, medication_request, service_request
+from graders.state_collector import patient_bundles_for_grade, snapshot_patient
+from graders.state_diff_grader import diff_bundles
 from analysis.agreement import agreement_counts, format_agreement, load_results, main as agreement_main
 from harness.http_client import HttpResult, UrllibHttpClient
-from harness.types import TaskCase
+from harness.types import AgentAction, TaskCase, ToolObservation, UnrecognizedAction
 from proxy.fault_proxy import FaultProxy
 from runners.baseline import (
+    DEFAULT_LENGTH_RETRY_TOKENS,
     DEFAULT_MODEL,
     GROQ_API_URL,
     GROQ_DEFAULT_MODEL,
     GROQ_RATE_LIMIT_RETRIES,
     GROQ_RATE_LIMIT_WAIT_CAP_S,
+    TRANSPORT_RETRIES,
     MissingApiKeyError,
     OpenAIChatClient,
+    encode_model_url,
     load_task_ids,
     parse_model_action,
+    render_observation,
     run_baseline,
+    system_prompt,
 )
 from tasks_io import load_task_file, repo_root
 
@@ -412,19 +419,27 @@ def test_gpt_oss_stop_returns_content_and_not_reasoning():
     assert http.calls[0]["body"]["max_completion_tokens"] == 4096
 
 
+def _length_response(content, reasoning, reasoning_tokens):
+    return (
+        200,
+        _gpt_oss_body(content, "length", reasoning, reasoning_tokens=reasoning_tokens),
+        {},
+    )
+
+
 def test_gpt_oss_length_with_empty_or_partial_content_is_not_executed():
     empty = _ScriptedHttp(
         [
-            (
-                200,
-                _gpt_oss_body(
-                    "",
-                    "length",
-                    "GET http://127.0.0.1:8080/fhir/Patient/REASONING_ONLY",
-                    reasoning_tokens=4096,
-                ),
-                {},
-            )
+            _length_response(
+                "",
+                "GET http://127.0.0.1:8080/fhir/Patient/REASONING_ONLY",
+                4096,
+            ),
+            _length_response(
+                "",
+                "GET http://127.0.0.1:8080/fhir/Patient/REASONING_ONLY",
+                4096,
+            ),
         ]
     )
     with pytest.raises(RuntimeError, match=r"finish_reason=length") as empty_error:
@@ -432,19 +447,21 @@ def test_gpt_oss_length_with_empty_or_partial_content_is_not_executed():
     empty_text = str(empty_error.value)
     assert "reasoning_tokens=4096" in empty_text
     assert "REASONING_ONLY" not in empty_text
+    assert empty.calls[0]["body"]["max_completion_tokens"] == 4096
+    assert empty.calls[1]["body"]["max_completion_tokens"] == DEFAULT_LENGTH_RETRY_TOKENS
 
     partial = _ScriptedHttp(
         [
-            (
-                200,
-                _gpt_oss_body(
-                    "GET http://127.0.0.1:8080/fhir/Patient/PARTIAL_ONLY",
-                    "length",
-                    "still thinking PARTIAL_REASONING",
-                    reasoning_tokens=100,
-                ),
-                {},
-            )
+            _length_response(
+                "GET http://127.0.0.1:8080/fhir/Patient/PARTIAL_ONLY",
+                "still thinking PARTIAL_REASONING",
+                100,
+            ),
+            _length_response(
+                "GET http://127.0.0.1:8080/fhir/Patient/PARTIAL_ONLY",
+                "still thinking PARTIAL_REASONING",
+                100,
+            ),
         ]
     )
     with pytest.raises(RuntimeError, match=r"finish_reason=length") as partial_error:
@@ -453,6 +470,7 @@ def test_gpt_oss_length_with_empty_or_partial_content_is_not_executed():
     assert "reasoning_tokens=100" in partial_text
     assert "PARTIAL_ONLY" not in partial_text
     assert "PARTIAL_REASONING" not in partial_text
+    assert partial.calls[1]["body"]["max_completion_tokens"] == 8192
 
 
 def test_null_content_names_finish_reason():
@@ -643,10 +661,16 @@ def test_api_key_with_a_newline_is_rejected_without_quoting_it(monkeypatch):
 
 
 def test_transport_status_zero_is_not_called_http_zero():
-    http = _ScriptedHttp([(0, {"error": "timed out"}, {})])
+    http = _ScriptedHttp([(0, {"error": "timed out"}, {})] * (TRANSPORT_RETRIES + 1))
+    sleeps = []
     with pytest.raises(RuntimeError, match=r"^transport error: timed out$") as caught:
-        _groq_client(http).complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+        _groq_client(http, sleep=sleeps.append).complete(
+            [{"role": "user", "content": "hi"}],
+            model="openai/gpt-oss-20b",
+        )
     assert "HTTP 0" not in str(caught.value)
+    assert len(http.calls) == TRANSPORT_RETRIES + 1
+    assert sleeps == [1.0] * TRANSPORT_RETRIES
 
 
 def test_openai_rate_limit_is_not_retried():
@@ -692,6 +716,9 @@ def test_cli_groq_uses_its_own_client_and_default_model(monkeypatch, tmp_path):
     assert code == 0
     assert captured["provider"] == "groq"
     assert captured["model"] == "openai/gpt-oss-20b"
+    assert captured["resume"] is False
+    assert captured["ready_timeout_s"] == 180
+    assert captured["client"].length_retry_tokens == 8192
     assert captured["client"].api_key == "groq-test"
     assert captured["client"].api_url == GROQ_API_URL
     assert captured["client"].max_completion_tokens == 4096
@@ -1049,22 +1076,28 @@ def test_reset_failure_keeps_trials_already_written(tmp_path):
         del assistant_turns, messages, model
         return "FINISH\n[1]"
 
-    with pytest.raises(RuntimeError, match="snapshot restore failed"):
-        run_baseline(
-            [task],
-            k=2,
-            output_dir=tmp_path / "partial",
-            model=DEFAULT_MODEL,
-            client=ScriptedChat(reply_for),
-            fhir_api_base="http://fhir.test/fhir/",
-            http=chart,
-            refsol_path=tmp_path / "absent.py",
-            reset=reset,
-        )
+    rows = run_baseline(
+        [task],
+        k=2,
+        output_dir=tmp_path / "partial",
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(reply_for),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=reset,
+    )
+    assert len(rows) == 2
+    assert rows[0]["trial"] == 0
+    assert rows[0]["state_passed"] is True
+    assert rows[1]["state_passed"] is False
+    assert rows[1]["contaminated"] is True
+    assert "snapshot restore failed" in rows[1]["failure_reason"]
     saved = load_results(tmp_path / "partial" / "results.jsonl")
-    assert len(saved) == 1
+    assert len(saved) == 2
     assert saved[0]["trial"] == 0
     assert saved[0]["task_id"] == "task2_1"
+    assert saved[1]["task_id"] == "task2_1"
 
 
 def test_stale_search_still_grades_a_write_from_its_location(tmp_path):
@@ -1104,3 +1137,545 @@ def test_stale_search_still_grades_a_write_from_its_location(tmp_path):
     )
     assert rows[0]["state_passed"] is True
     assert any(item.startswith("Observation/") for item in rows[0]["created"])
+
+
+def test_system_prompt_includes_functions_finish_and_no_delete():
+    prompt = system_prompt("http://127.0.0.1:8080/fhir/")
+    assert "GET {api_base}/Patient" in prompt
+    assert "birthdate" in prompt
+    assert "given" in prompt
+    assert "family" in prompt
+    assert "The final answer must start with FINISH" in prompt
+    assert "Only GET, POST, and PUT are available" in prompt
+    assert "DELETE is not supported" in prompt
+    assert prompt.index("functions in JSON format") < prompt.index("note is a list")
+
+
+def test_parse_model_action_encodes_unsafe_characters_once():
+    piped = parse_model_action(
+        "GET http://127.0.0.1:8080/fhir/Patient?identifier=MRN|S6415739"
+    )
+    assert piped.url.endswith("identifier=MRN%7CS6415739")
+    zoned = parse_model_action(
+        "GET http://127.0.0.1:8080/fhir/Observation?patient=S1"
+        "&effective=ge2023-11-12T10:15:00+00:00"
+    )
+    assert "ge2023-11-12T10" in zoned.url
+    assert "%2B00" in zoned.url
+    assert "+" not in zoned.url.split("?", 1)[1]
+    spaced = parse_model_action("GET http://127.0.0.1:8080/fhir/Patient?name=Peter Stafford")
+    assert "name=Peter%20Stafford" in spaced.url
+    kept = encode_model_url("http://127.0.0.1:8080/fhir/Patient?name=Peter%20Stafford")
+    assert "name=Peter%20Stafford" in kept
+    assert "%2520" not in kept
+
+
+def test_parse_model_action_keeps_only_the_first_of_several():
+    action = parse_model_action(
+        "GET http://fhir.test/fhir/Patient?name=Peter%20Stafford\n"
+        "POST http://fhir.test/fhir/Observation\n"
+        '{"resourceType": "Observation"}\n'
+    )
+    assert action.kind == "GET"
+    assert action.url.endswith("name=Peter%20Stafford")
+    same_line = parse_model_action("GET http://fhir.test/fhir/Patient/1 POST http://fhir.test/fhir/Observation")
+    assert same_line.kind == "GET"
+    assert same_line.url == "http://fhir.test/fhir/Patient/1"
+    finished = parse_model_action("FINISH([90])")
+    assert finished.kind == "FINISH"
+    assert finished.finish_payload == "[90]"
+    with pytest.raises(UnrecognizedAction, match="unrecognized action"):
+        parse_model_action("93.0")
+    with pytest.raises(UnrecognizedAction, match="unrecognized action"):
+        parse_model_action('{"answer": 1}')
+
+
+def test_bare_reply_is_returned_to_the_model(tmp_path):
+    task = load_task_file()["task2_1"]
+    chart = Chart(task.eval_mrn)
+    seen = []
+
+    def reply_for(assistant_turns, messages, model):
+        del model
+        seen.append(messages)
+        if assistant_turns == 0:
+            return "90"
+        if assistant_turns == 1:
+            return "-1"
+        return "FINISH\n[73]"
+
+    rows = run_baseline(
+        [task],
+        k=1,
+        output_dir=tmp_path / "bare",
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(reply_for),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=chart.reset,
+    )
+    assert rows[0]["state_passed"] is True
+    assert rows[0]["finish_text"] == "[73]"
+    feedback = " ".join(message["content"] for message in seen[-1] if message["role"] == "user")
+    assert "unrecognized action '90'" in feedback
+    assert "unrecognized action '-1'" in feedback
+    assert "FINISH" in feedback
+
+
+def test_delete_is_rejected_without_calling_the_server(tmp_path):
+    task = load_task_file()["task2_1"]
+    chart = Chart(task.eval_mrn)
+    methods = []
+    original = chart.request
+
+    def request(method, url, body=None, headers=None, timeout=None):
+        methods.append(method)
+        return original(method, url, body=body, headers=headers, timeout=timeout)
+
+    chart.request = request
+
+    def reply_for(assistant_turns, messages, model):
+        del model
+        if assistant_turns == 0:
+            return "DELETE http://127.0.0.1:8080/fhir/MedicationRequest/786003"
+        text = " ".join(message["content"] for message in messages)
+        assert "DELETE is not supported" in text
+        return "FINISH\n[1]"
+
+    rows = run_baseline(
+        [task],
+        k=1,
+        output_dir=tmp_path / "delete",
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(reply_for),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=chart.reset,
+    )
+    assert rows[0]["state_passed"] is True
+    assert "DELETE" not in methods
+
+
+def test_html_error_pages_become_short_text_and_outcomes_stay_json():
+    html = (
+        "<html><head><title>400 Bad Request</title></head>"
+        "<body><h1>HTTP Status 400 – Bad Request</h1>"
+        "<p>Invalid character found in the request target</p>"
+        + ("<p>pad</p>" * 200)
+        + "</body></html>"
+    )
+    text = render_observation(
+        AgentAction(kind="GET", url="http://fhir.test/fhir/Patient"),
+        ToolObservation(status=400, body=html, headers={}),
+    )
+    assert "<html" not in text.lower()
+    assert "Bad Request" in text
+    assert "Invalid character" in text
+    assert len(text) < 800
+    outcome = {
+        "resourceType": "OperationOutcome",
+        "issue": [{"severity": "error", "diagnostics": "Unknown search parameter"}],
+    }
+    kept = render_observation(
+        AgentAction(kind="GET", url="http://fhir.test/fhir/Observation"),
+        ToolObservation(status=400, body=outcome, headers={}),
+    )
+    assert "OperationOutcome" in kept
+    assert "Unknown search parameter" in kept
+
+
+def test_length_retry_uses_the_stopped_completion():
+    http = _ScriptedHttp(
+        [
+            _length_response("GET http://fhir.test/PARTIAL", "thinking", 4094),
+            (
+                200,
+                {"choices": [{"finish_reason": "stop", "message": {"content": "FINISH\n[1]"}}]},
+                {},
+            ),
+        ]
+    )
+    text = _groq_client(http).complete([{"role": "user", "content": "hi"}], model="openai/gpt-oss-20b")
+    assert text == "FINISH\n[1]"
+    assert http.calls[0]["body"]["max_completion_tokens"] == 4096
+    assert http.calls[1]["body"]["max_completion_tokens"] == 8192
+
+
+def test_transient_handshake_is_retried():
+    http = _ScriptedHttp(
+        [
+            (0, {"error": "_ssl.c:1067: The handshake operation timed out"}, {}),
+            (200, {"choices": [{"message": {"content": "FINISH\n[]"}}]}, {}),
+        ]
+    )
+    sleeps = []
+    text = _groq_client(http, sleep=sleeps.append).complete(
+        [{"role": "user", "content": "hi"}],
+        model="openai/gpt-oss-20b",
+    )
+    assert text == "FINISH\n[]"
+    assert len(http.calls) == 2
+    assert sleeps == [1.0]
+
+
+def test_one_task_error_does_not_stop_the_next(tmp_path):
+    tasks = load_task_file()
+    first = tasks["task1_1"]
+    second = tasks["task2_1"]
+    chart = Chart(second.eval_mrn)
+
+    def request(method, url, body=None, headers=None, timeout=None):
+        if first.eval_mrn in url:
+            raise RuntimeError(f"search exceeded 200 pages: {url}")
+        return chart.request(method, url, body=body, headers=headers, timeout=timeout)
+
+    class Split:
+        def request(self, method, url, body=None, headers=None, timeout=None):
+            return request(method, url, body=body, headers=headers, timeout=timeout)
+
+    def reply_for(assistant_turns, messages, model):
+        del assistant_turns, messages, model
+        return "FINISH\n[1]"
+
+    rows = run_baseline(
+        [first, second],
+        k=1,
+        output_dir=tmp_path / "isolated",
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(reply_for),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=Split(),
+        refsol_path=tmp_path / "absent.py",
+        reset=lambda: None,
+    )
+    assert len(rows) == 2
+    assert rows[0]["task_id"] == "task1_1"
+    assert rows[0]["state_passed"] is False
+    assert "search exceeded 200 pages" in rows[0]["failure_reason"]
+    assert rows[1]["task_id"] == "task2_1"
+    assert rows[1]["state_passed"] is True
+    saved = load_results(tmp_path / "isolated" / "results.jsonl")
+    assert [row["task_id"] for row in saved] == ["task1_1", "task2_1"]
+
+
+def test_resume_skips_pairs_already_in_results(tmp_path):
+    task = load_task_file()["task2_1"]
+    chart = Chart(task.eval_mrn)
+    calls = {"n": 0}
+
+    def reply_for(assistant_turns, messages, model):
+        del assistant_turns, messages, model
+        calls["n"] += 1
+        return "FINISH\n[1]"
+
+    output = tmp_path / "resume"
+    first = run_baseline(
+        [task],
+        k=1,
+        output_dir=output,
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(reply_for),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=chart.reset,
+    )
+    assert calls["n"] == 1
+    assert first[0]["finish_text"] == "[1]"
+
+    def second_reply(assistant_turns, messages, model):
+        del assistant_turns, messages, model
+        calls["n"] += 1
+        return "FINISH\n[2]"
+
+    calls["n"] = 0
+    rows = run_baseline(
+        [task],
+        k=2,
+        output_dir=output,
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(second_reply),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=chart.reset,
+        resume=True,
+    )
+    assert calls["n"] == 1
+    assert rows[0]["trial"] == 0
+    assert rows[0]["finish_text"] == "[1]"
+    assert rows[1]["trial"] == 1
+    assert rows[1]["finish_text"] == "[2]"
+    assert chart.reset_count == 2
+
+
+class LargeHistory:
+    """Thousands of observations. Deep pages fail; counts and watermarks do not."""
+
+    def __init__(self, patient_id):
+        self.patient_id = patient_id
+        self.patient = {"resourceType": "Patient", "id": patient_id}
+        self.observations = []
+        for index in range(5000):
+            self.observations.append(
+                {
+                    "resourceType": "Observation",
+                    "id": f"old-{index}",
+                    "status": "final",
+                    "code": {"text": "OTHER", "coding": [{"code": "OTHER"}]},
+                    "meta": {"lastUpdated": "2020-01-01T00:00:00+00:00", "versionId": "1"},
+                    "subject": {"reference": f"Patient/{patient_id}"},
+                }
+            )
+        self.observations.append(
+            {
+                "resourceType": "Observation",
+                "id": "mg1",
+                "status": "final",
+                "code": {"text": "MG", "coding": [{"code": "MG"}]},
+                "effectiveDateTime": "2023-11-13T08:00:00+00:00",
+                "valueQuantity": {"value": 1.2, "unit": "mg/dL"},
+                "meta": {"lastUpdated": "2020-06-01T00:00:00+00:00", "versionId": "1"},
+                "subject": {"reference": f"Patient/{patient_id}"},
+            }
+        )
+        self.medications = []
+        self.services = []
+        self.histories = {}
+        self.urls = []
+        self.statuses = []
+        self.next_id = 1
+
+    def request(self, method, url, body=None, headers=None, timeout=None):
+        del headers, timeout
+        self.urls.append(url)
+        if "_getpages" in url or "_getpagesoffset" in url:
+            result = HttpResult(500, {"error": "deep page"}, {}, 1)
+            self.statuses.append(result.status)
+            return result
+        if (
+            "/Observation?" in url
+            and "_count=200" in url
+            and "_lastUpdated=gt" not in url
+            and "_summary=count" not in url
+        ):
+            result = HttpResult(500, {"error": "full history"}, {}, 1)
+            self.statuses.append(result.status)
+            return result
+        if method == "GET" and f"/Patient/{self.patient_id}" in url and "?" not in url:
+            return self._ok(self.patient)
+        if "/_history" in url:
+            return self._history(url)
+        if method == "GET" and "?" not in url:
+            return self._read(url)
+        if method == "GET" and "_summary=count" in url:
+            return self._ok(self._count_bundle(url))
+        if method == "GET" and "/Observation?" in url and "_count=1" in url:
+            newest = max(self.observations, key=lambda item: item["meta"]["lastUpdated"])
+            return self._ok(self._bundle([newest], total=len(self.observations)))
+        if method == "GET" and "code=MG" in url:
+            labs = [item for item in self.observations if item["code"]["text"] == "MG"]
+            return self._ok(self._bundle(labs, total=len(labs)))
+        if method == "GET" and ("code=K" in url or "code=A1C" in url):
+            return self._ok(self._bundle([], total=0))
+        if method == "GET" and "_lastUpdated=gt" in url:
+            return self._changed(url)
+        if method == "GET" and "/MedicationRequest?" in url:
+            return self._ok(self._bundle(self.medications, total=len(self.medications)))
+        if method == "GET" and "/ServiceRequest?" in url:
+            return self._ok(self._bundle(self.services, total=len(self.services)))
+        if method == "POST" and url.split("?")[0].rstrip("/").endswith("/Observation"):
+            resource = json.loads(json.dumps(body))
+            resource["id"] = "bp-1"
+            resource["meta"] = {"versionId": "1", "lastUpdated": "2024-01-01T00:00:00+00:00"}
+            self.observations.append(resource)
+            location = url.split("?")[0].rstrip("/") + f"/{resource['id']}/_history/1"
+            result = HttpResult(201, resource, {"Location": location}, 1)
+            self.statuses.append(result.status)
+            return result
+        if method == "PUT" and "/Observation/" in url:
+            resource = json.loads(json.dumps(body or {}))
+            resource_id = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+            resource["id"] = resource_id
+            resource["meta"] = {"versionId": "2", "lastUpdated": "2024-01-01T00:00:01+00:00"}
+            replaced = False
+            kept = []
+            for item in self.observations:
+                if item["id"] == resource_id:
+                    kept.append(resource)
+                    replaced = True
+                else:
+                    kept.append(item)
+            if not replaced:
+                kept.append(resource)
+            self.observations = kept
+            return self._ok(resource)
+        if method == "POST" and "/MedicationRequest" in url:
+            resource = json.loads(json.dumps(body))
+            resource["id"] = f"med-{self.next_id}"
+            self.next_id += 1
+            resource["meta"] = {"versionId": "1", "lastUpdated": "2024-01-01T00:00:00+00:00"}
+            self.medications.append(resource)
+            location = url.split("?")[0].rstrip("/") + f"/{resource['id']}/_history/1"
+            result = HttpResult(201, resource, {"Location": location}, 1)
+            self.statuses.append(result.status)
+            return result
+        result = HttpResult(404, {"resourceType": "OperationOutcome"}, {}, 1)
+        self.statuses.append(result.status)
+        return result
+
+    def _ok(self, body):
+        result = HttpResult(200, body, {}, 1)
+        self.statuses.append(result.status)
+        return result
+
+    def _bundle(self, resources, total):
+        return {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "total": total,
+            "entry": [{"resource": item} for item in resources],
+        }
+
+    def _count_bundle(self, url):
+        if "/Observation?" in url:
+            total = len(self.observations)
+        elif "/MedicationRequest?" in url:
+            total = len(self.medications)
+        else:
+            total = len(self.services)
+        return {"resourceType": "Bundle", "type": "searchset", "total": total}
+
+    def _changed(self, url):
+        from urllib.parse import unquote
+
+        marker = "_lastUpdated=gt"
+        raw = unquote(url.split(marker, 1)[1].split("&", 1)[0])
+        changed = [
+            item
+            for item in self.observations
+            if item.get("meta", {}).get("lastUpdated", "") > raw
+        ]
+        return self._ok(self._bundle(changed, total=len(changed)))
+
+    def _read(self, url):
+        resource_id = url.rstrip("/").rsplit("/", 1)[-1]
+        for collection in (self.observations, self.medications, self.services):
+            for item in collection:
+                if item["id"] == resource_id:
+                    return self._ok(item)
+        return HttpResult(404, {"resourceType": "OperationOutcome"}, {}, 1)
+
+    def _history(self, url):
+        resource_id = url.split("/_history", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+        versions = self.histories.get(resource_id)
+        if versions:
+            return self._ok(self._bundle(versions, total=len(versions)))
+        for item in self.observations:
+            if item["id"] == resource_id:
+                return self._ok(self._bundle([item], total=1))
+        return HttpResult(404, {"resourceType": "OperationOutcome"}, {}, 1)
+
+
+def test_large_history_grades_a_create_without_paging(tmp_path):
+    task = load_task_file()["task5_1"]
+    chart = LargeHistory(task.eval_mrn)
+    body = medication_request(
+        task.eval_mrn,
+        require_ndc(task.context),
+        "IV",
+        2,
+        "g",
+        rate_value=2,
+        rate_unit="h",
+    )
+    rows = run_baseline(
+        [task],
+        k=1,
+        output_dir=tmp_path / "large",
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(_post_then_finish(body, "http://fhir.test/fhir/MedicationRequest")),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=lambda: None,
+    )
+    assert rows[0]["state_passed"] is True, rows[0]["mismatches"]
+    assert 500 not in chart.statuses
+    assert not any("_getpages" in url for url in chart.urls)
+    assert not any(
+        "/Observation?" in url and "_count=200" in url and "_lastUpdated=gt" not in url
+        for url in chart.urls
+    )
+    assert len(chart.urls) < 40
+    snapshot = snapshot_patient(chart, "http://fhir.test/fhir/", task.eval_mrn)
+    assert len(snapshot.bundle["entry"]) < 20
+    assert snapshot.large is True
+
+
+def test_large_history_grades_a_post_then_put_as_a_create(tmp_path):
+    task = load_task_file()["task3_1"]
+    chart = LargeHistory(task.eval_mrn)
+    posted = blood_pressure_observation(
+        task.eval_mrn, first_quoted(task.instruction), require_bp_code(task.context)
+    )
+    updated = blood_pressure_observation(
+        task.eval_mrn,
+        first_quoted(task.instruction),
+        require_bp_code(task.context),
+        "bp-1",
+    )
+
+    def reply_for(assistant_turns, messages, model):
+        del messages, model
+        if assistant_turns == 0:
+            return "POST http://fhir.test/fhir/Observation\n" + json.dumps(posted)
+        if assistant_turns == 1:
+            return "PUT http://fhir.test/fhir/Observation/bp-1\n" + json.dumps(updated)
+        return "FINISH\n[]"
+
+    rows = run_baseline(
+        [task],
+        k=1,
+        output_dir=tmp_path / "large-put",
+        model=DEFAULT_MODEL,
+        client=ScriptedChat(reply_for),
+        fhir_api_base="http://fhir.test/fhir/",
+        http=chart,
+        refsol_path=tmp_path / "absent.py",
+        reset=lambda: None,
+    )
+    assert rows[0]["state_passed"] is True, rows[0]["mismatches"]
+    assert rows[0]["updated"] == []
+    assert any(item.startswith("Observation/") for item in rows[0]["created"])
+    assert 500 not in chart.statuses
+
+
+def test_large_history_detects_an_update_and_a_delete():
+    chart = LargeHistory("S1")
+    base = "http://fhir.test/fhir/"
+    snapshot = snapshot_patient(chart, base, "S1")
+    target = next(item for item in chart.observations if item["id"] == "old-0")
+    updated = json.loads(json.dumps(target))
+    updated["valueQuantity"] = {"value": 9, "unit": "mg/dL"}
+    updated["meta"] = {"lastUpdated": "2024-01-01T00:00:00+00:00", "versionId": "2"}
+    chart.observations = [updated if item["id"] == "old-0" else item for item in chart.observations]
+    chart.histories["old-0"] = [target, updated]
+    pre, post = patient_bundles_for_grade(chart, base, "S1", snapshot, [])
+    diff = diff_bundles(pre, post)
+    assert [item["id"] for item in diff["updated"]] == ["old-0"]
+    assert diff["created"] == []
+    assert diff["deleted"] == []
+
+
+def test_large_history_detects_a_delete():
+    chart = LargeHistory("S1")
+    base = "http://fhir.test/fhir/"
+    snapshot = snapshot_patient(chart, base, "S1")
+    assert any(entry["resource"]["id"] == "mg1" for entry in snapshot.bundle["entry"])
+    chart.observations = [item for item in chart.observations if item["id"] != "mg1"]
+    pre, post = patient_bundles_for_grade(chart, base, "S1", snapshot, [])
+    deleted = diff_bundles(pre, post)
+    assert any(item["id"] == "mg1" for item in deleted["deleted"])

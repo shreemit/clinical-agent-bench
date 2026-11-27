@@ -27,29 +27,39 @@ t_copy1="$(now_ms)"
 
 t_ready0="$(now_ms)"
 compose up -d hapi >/dev/null
-ready=0
-for _ in $(seq 1 120); do
-  if curl -sf -m 2 -o /dev/null "$FHIR_METADATA_URL"; then
-    ready=1
-    break
-  fi
-  sleep 1
-done
+READY_TIMEOUT_S="${CAB_READY_TIMEOUT_S:-180}"
+set +e
+ready_stdout="$(
+  PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -m fhir.hapi_ready \
+    --timeout "$READY_TIMEOUT_S" \
+    --metadata-url "$FHIR_METADATA_URL" \
+    --container "$HAPI_CONTAINER" \
+    --docker "${DOCKER[*]}"
+)"
+ready_code=$?
+set -e
 t1="$(now_ms)"
-
-if [[ "$ready" -ne 1 ]]; then
-  echo "FHIR did not become ready after snapshot restore." >&2
-  "${DOCKER[@]}" logs --tail 40 cab-exec-hapi >&2 || true
-  exit 1
-fi
+export READY_STDOUT="$ready_stdout"
+export READY_CODE="$ready_code"
+export READY_TIMEOUT_S
 
 python3 - "$t0" "$t_stop0" "$t_stop1" "$t_copy0" "$t_copy1" "$t_ready0" "$t1" "$TARGET_MS" "$ROOT" << 'PY'
 import json
+import os
 import pathlib
 import sys
 
 t0, t_stop0, t_stop1, t_copy0, t_copy1, t_ready0, t1, target, root = sys.argv[1:]
 t0, t_stop0, t_stop1, t_copy0, t_copy1, t_ready0, t1, target = map(int, (t0, t_stop0, t_stop1, t_copy0, t_copy1, t_ready0, t1, target))
+restarted = False
+restart_ms = 0
+for line in os.environ.get("READY_STDOUT", "").splitlines():
+    if line.startswith("READY_JSON "):
+        payload = json.loads(line[len("READY_JSON ") :])
+        restarted = bool(payload.get("restarted"))
+        restart_ms = int(payload.get("restart_ms") or 0)
+        break
 total = t1 - t0
 record = {
     "duration_ms": total,
@@ -58,6 +68,9 @@ record = {
     "ready_ms": t1 - t_ready0,
     "under_5s": total < target,
     "target_ms": target,
+    "restarted": restarted,
+    "restart_ms": restart_ms,
+    "ready_timeout_s": int(float(os.environ.get("READY_TIMEOUT_S", "180"))),
 }
 line = json.dumps(record)
 path = pathlib.Path(root) / "runs" / "reset_timings.jsonl"
@@ -67,7 +80,14 @@ with path.open("a") as handle:
 print("RESET_JSON " + line)
 print(
     f"reset {total} ms (stop {record['stop_ms']} ms, "
-    f"copy {record['restore_copy_ms']} ms, ready {record['ready_ms']} ms) "
+    f"copy {record['restore_copy_ms']} ms, ready {record['ready_ms']} ms, "
+    f"restarted={str(record['restarted']).lower()}, restart {record['restart_ms']} ms) "
     f"under_{target}ms={str(record['under_5s']).lower()}"
 )
 PY
+
+if [[ "$ready_code" -ne 0 ]]; then
+  echo "FHIR did not become ready after snapshot restore and one container restart." >&2
+  "${DOCKER[@]}" logs --tail 40 "$HAPI_CONTAINER" >&2 || true
+  exit 1
+fi

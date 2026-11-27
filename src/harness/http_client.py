@@ -30,13 +30,58 @@ class HttpClient(Protocol):
     ) -> HttpResult: ...
 
 
+_TRANSIENT_MARKERS = (
+    "timed out",
+    "timeout",
+    "handshake",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "remote end closed",
+    "remotedisconnected",
+    "broken pipe",
+    "temporarily unavailable",
+    "eof occurred",
+)
+
+
+def is_transient_transport(body: Any) -> bool:
+    """True when a status-0 body looks like a retryable socket or TLS error."""
+
+    if isinstance(body, dict) and "error" in body:
+        text = str(body["error"])
+    else:
+        text = str(body)
+    lowered = text.lower()
+    return any(marker in lowered for marker in _TRANSIENT_MARKERS)
+
+
 class UrllibHttpClient:
     """HTTP statuses and transport failures are returned, not raised."""
 
-    def __init__(self, timeout: float = 120) -> None:
+    def __init__(self, timeout: float = 120, transport_retries: int = 2) -> None:
         self.timeout = timeout
+        self.transport_retries = transport_retries
 
     def request(
+        self,
+        method: str,
+        url: str,
+        body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> HttpResult:
+        attempts = 1
+        if method.upper() == "GET" and self.transport_retries > 0:
+            attempts = 1 + self.transport_retries
+        last: HttpResult | None = None
+        for attempt in range(attempts):
+            last = self._request_once(method, url, body, headers, timeout)
+            if last.status != 0 or attempt + 1 == attempts or not is_transient_transport(last.body):
+                return last
+        return last
+
+    def _request_once(
         self,
         method: str,
         url: str,

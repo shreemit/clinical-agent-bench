@@ -7,6 +7,10 @@ from typing import Any, Literal
 ActionKind = Literal["GET", "POST", "PUT", "FINISH"]
 
 
+class UnrecognizedAction(ValueError):
+    """The model reply is not one GET, POST, PUT, or FINISH action."""
+
+
 @dataclass(frozen=True)
 class TaskCase:
     id: str

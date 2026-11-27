@@ -4,7 +4,14 @@ import json
 from typing import Any
 
 from harness.http_client import HttpClient, UrllibHttpClient
-from harness.types import AgentAction, CapturedCall, TaskCase, ToolObservation, TrialRecord
+from harness.types import (
+    AgentAction,
+    CapturedCall,
+    TaskCase,
+    ToolObservation,
+    TrialRecord,
+    UnrecognizedAction,
+)
 
 
 # TODO(decision): every write is forwarded; there is no clinician approval step.
@@ -54,6 +61,9 @@ class ExecHarness:
         for round_index in range(self.max_rounds):
             try:
                 action = agent.next_action(observation)
+            except UnrecognizedAction as error:
+                observation = ToolObservation(status=400, body=str(error), headers={})
+                continue
             except Exception as error:
                 return TrialRecord(
                     task_id=task.id,
